@@ -540,9 +540,11 @@ testPermissions = do
     AutopilotPerm AP_CRONJOB_DELETE `notElem` managerPerms
   assertBool "Manager can create and edit CronJobs" $
     all (\p -> AutopilotPerm p `elem` managerPerms) [AP_CRONJOB_VIEW, AP_CRONJOB_CREATE, AP_CRONJOB_EDIT]
+  assertBool "Manager DOES NOT have CONFIG_PILOT_RELEASE" $
+    AutopilotPerm AP_CONFIG_PILOT_RELEASE `notElem` managerPerms
   assertEqual
-    "Manager has all perms minus the 6 restricted perms (PRODUCT_CONFIG_EDIT, SERVICE_CONFIG_EDIT, RELEASE_DELETE, RELEASE_CREATE_STANDALONE, HPA_GUARDRAIL_EDIT, CRONJOB_DELETE)"
-    (length allPerms - 6)
+    "Manager has all perms minus the 7 restricted perms (PRODUCT_CONFIG_EDIT, SERVICE_CONFIG_EDIT, RELEASE_DELETE, RELEASE_CREATE_STANDALONE, HPA_GUARDRAIL_EDIT, CRONJOB_DELETE, CONFIG_PILOT_RELEASE)"
+    (length allPerms - 7)
     (length managerPerms)
 
   -- ── Mobile product (2026-07-31 split): MB_* + the whole OTA family ──

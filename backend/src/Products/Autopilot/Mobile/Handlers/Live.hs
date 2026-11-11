@@ -94,7 +94,7 @@ instance FromJSON LiveReleasesResp
 -- ---------------------------------------------------------------------------
 
 backendCategories :: [Text]
-backendCategories = ["BackendService", "BackendScheduler", "BackendConfig"]
+backendCategories = ["BackendService", "BackendScheduler", "BackendConfig", "ConfigPilot"]
 
 mobileCategory :: Text
 mobileCategory = "MobileBuild"

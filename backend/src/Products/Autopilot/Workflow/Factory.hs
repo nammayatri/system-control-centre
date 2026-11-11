@@ -23,6 +23,7 @@ import Products.Autopilot.Mobile.Workflow (mobileBuildSpec)
 import Products.Autopilot.Workflow.BackendConfigWorkflow (backendConfigSpec)
 import Products.Autopilot.Workflow.BackendSchedulerWorkflow (backendSchedulerSpec)
 import Products.Autopilot.Workflow.BackendServiceWorkflow (backendServiceSpec)
+import Products.Autopilot.Workflow.ConfigPilotWorkflow (configPilotSpec)
 import Products.Autopilot.Workflow.Recorded (runRecorded)
 import Products.Autopilot.Workflow.Types (
     ReleaseState (..),
@@ -53,6 +54,7 @@ getWorkflowForCategory = \case
     BackendService -> runWorkflowSpec backendServiceSpec
     BackendScheduler -> runWorkflowSpec backendSchedulerSpec
     BackendConfig -> runWorkflowSpec backendConfigSpec
+    ConfigPilot -> runWorkflowSpec configPilotSpec
     VSEdit -> notImplementedWorkflow "VSEdit"
     MobileBuild -> runWorkflowSpec mobileBuildSpec
 

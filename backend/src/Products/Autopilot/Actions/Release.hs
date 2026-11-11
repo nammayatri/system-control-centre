@@ -35,6 +35,7 @@ module Products.Autopilot.Actions.Release
     logsLinkH,
     decisionWebhookH,
     staggerInfoH,
+    insertReleaseTrackerSafe,
     rolloutRestartDeploymentH,
 
     -- * Product/Service Handlers (used in Routes wiring)
@@ -119,6 +120,7 @@ import Products.Autopilot.Types.Storage.Schema qualified as S
 import Products.Autopilot.Types.Target (TargetState (..))
 import Products.Autopilot.Types.Target.Kubernetes
 import Products.Autopilot.Types.Target.Kubernetes qualified as K8s
+import Products.Autopilot.Workflow.ConfigPilotWorkflow (configPilotStaggerInfo)
 import Products.Autopilot.Workflow.Helpers (captureDeploymentPreview, captureDeploymentSnapshot)
 import Shared.API.Response (APIResponse (..))
 
@@ -2647,8 +2649,8 @@ staggerInfoH rid = do
   case m of
     Nothing -> pure $ object ["percentage" .= (0.0 :: Double), "time" .= ("1970-01-01T00:00:00Z" :: Text)]
     Just (rt, mts) -> do
-      let pct :: Double
-          pct = case mts of
+      let k8sPct :: Double
+          k8sPct = case mts of
             Just ts -> case A.fromJSON (toJSON ts) of
               A.Success (Object o) ->
                 case KM.lookup (K.fromText "trafficPercentage") o of
@@ -2656,7 +2658,10 @@ staggerInfoH rid = do
                   _ -> 0
               _ -> 0
             Nothing -> 0
-          startIso = maybe "1970-01-01T00:00:00Z" (T.pack . formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%SZ") (NT.startTime rt)
+          (pct, stepStart)
+            | NT.category rt == ConfigPilot = configPilotStaggerInfo rt
+            | otherwise = (k8sPct, NT.startTime rt)
+          startIso = maybe "1970-01-01T00:00:00Z" (T.pack . formatTime defaultTimeLocale "%Y-%m-%dT%H:%M:%SZ") stepStart
       pure $ object ["percentage" .= pct, "time" .= startIso]
 
 -- | Extract just the data section from a K8s ConfigMap YAML as JSON.

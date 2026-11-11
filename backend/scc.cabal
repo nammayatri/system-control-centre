@@ -58,6 +58,7 @@ library
       Products.Autopilot.ApiLatencyReport
       Products.Autopilot.Config
       Products.Autopilot.ConfigDiff
+      Products.Autopilot.ConfigPilot.Client
       Products.Autopilot.ConfigReview
       Products.Autopilot.DecisionEngine
       Products.Autopilot.DiffLink
@@ -183,6 +184,7 @@ library
       Products.Autopilot.Actions.ABValidation
       Products.Autopilot.Actions.Config
       Products.Autopilot.Actions.ConfigMap
+      Products.Autopilot.Actions.ConfigPilotRelease
       Products.Autopilot.Actions.K8sResource
       Products.Autopilot.Actions.Release
       Products.Autopilot.Actions.QaAutomation
@@ -212,6 +214,7 @@ library
       Products.Autopilot.Workflow.BackendConfigWorkflow
       Products.Autopilot.Workflow.BackendSchedulerWorkflow
       Products.Autopilot.Workflow.BackendServiceWorkflow
+      Products.Autopilot.Workflow.ConfigPilotWorkflow
       Products.Autopilot.Workflow.Factory
       Products.Autopilot.Workflow.Helpers
       Products.Autopilot.Workflow.Recorded

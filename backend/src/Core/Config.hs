@@ -55,6 +55,8 @@ data Config = Config
     prometheusUrl :: String,
     abEngineUrl :: String,
     abHsUrl :: String,
+    configPilotBapUrl :: String,
+    configPilotBppUrl :: String,
     mcpBaseUrl :: Text,
     cloudProvider :: Text,
     -- Airborne OTA control-plane base URL (PAT creds come from Core.Secrets
@@ -96,6 +98,8 @@ loadConfig = do
   prometheusUrl <- envOr "PROMETHEUS_URL" ""
   abEngineUrl <- envOr "AB_ENGINE_URL" ""
   abHsUrl <- envOr "AB_HS_URL" ""
+  configPilotBapUrl <- envOr "SC_CONFIGPILOT_BAP_URL" ""
+  configPilotBppUrl <- envOr "SC_CONFIGPILOT_BPP_URL" ""
 
   mcpBaseUrl <- pack <$> envOr "SC_MCP_BASE_URL" ""
 

@@ -10,6 +10,14 @@
 module Products.Autopilot.Workflow.BackendServiceWorkflow
   ( backendServiceSpec,
     checkPodHealthDetailed,
+    casUpdateOrBail,
+    unsnocList,
+    safeIndex,
+    updateLastHistoryEntry,
+    abortWithReason,
+    mkRolloutHistory,
+    maxLoopIterations,
+    maxLoopDurationSec,
   )
 where
 

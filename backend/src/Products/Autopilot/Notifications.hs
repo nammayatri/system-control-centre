@@ -467,6 +467,7 @@ releasePathPrefix :: ReleaseCategory -> Text
 releasePathPrefix MobileBuild = "mobile/releases"
 releasePathPrefix VSEdit = "backend/vs-editor"
 releasePathPrefix BackendConfig = "backend/configmap"
+releasePathPrefix ConfigPilot = "backend/config-releases"
 releasePathPrefix BackendService = "backend/releases"
 releasePathPrefix BackendScheduler = "backend/releases"
 

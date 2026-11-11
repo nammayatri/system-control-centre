@@ -155,6 +155,7 @@ cloudTypeForCategory cat = case cat of
     BackendService -> instanceCloud
     BackendScheduler -> instanceCloud
     BackendConfig -> instanceCloud
+    ConfigPilot -> instanceCloud
     VSEdit -> instanceCloud
   where
     instanceCloud = Just . cloudProvider <$> getConfig
@@ -1380,6 +1381,7 @@ parseReleaseCategory t =
         "BACKENDCONFIG" -> BackendConfig
         "VSEDIT" -> VSEdit
         "MOBILEBUILD" -> MobileBuild
+        "CONFIGPILOT" -> ConfigPilot
         -- Unknown values (including legacy categories) log a warning instead
         -- of being silently swallowed.
         _ ->

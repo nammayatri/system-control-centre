@@ -54,6 +54,7 @@ data AutopilotPermission
   | AP_CRONJOB_CREATE
   | AP_CRONJOB_EDIT
   | AP_CRONJOB_DELETE
+  | AP_CONFIG_PILOT_RELEASE
   deriving (Show, Read, Eq, Ord, Enum, Bounded)
 
 autopilotPermissionToText :: AutopilotPermission -> Text
@@ -92,6 +93,7 @@ autopilotPermissionToText AP_CRONJOB_VIEW = "CRONJOB_VIEW"
 autopilotPermissionToText AP_CRONJOB_CREATE = "CRONJOB_CREATE"
 autopilotPermissionToText AP_CRONJOB_EDIT = "CRONJOB_EDIT"
 autopilotPermissionToText AP_CRONJOB_DELETE = "CRONJOB_DELETE"
+autopilotPermissionToText AP_CONFIG_PILOT_RELEASE = "CONFIG_PILOT_RELEASE"
 
 textToAutopilotPermission :: Text -> Maybe AutopilotPermission
 textToAutopilotPermission "RELEASE_VIEW" = Just AP_RELEASE_VIEW
@@ -129,6 +131,7 @@ textToAutopilotPermission "CRONJOB_VIEW" = Just AP_CRONJOB_VIEW
 textToAutopilotPermission "CRONJOB_CREATE" = Just AP_CRONJOB_CREATE
 textToAutopilotPermission "CRONJOB_EDIT" = Just AP_CRONJOB_EDIT
 textToAutopilotPermission "CRONJOB_DELETE" = Just AP_CRONJOB_DELETE
+textToAutopilotPermission "CONFIG_PILOT_RELEASE" = Just AP_CONFIG_PILOT_RELEASE
 textToAutopilotPermission _ = Nothing
 
 -- | Human-readable description (exhaustive, -Wall catches missing variants).
@@ -168,6 +171,7 @@ permissionDescription AP_CRONJOB_VIEW = "View CronJobs in a namespace"
 permissionDescription AP_CRONJOB_CREATE = "Create CronJobs from YAML"
 permissionDescription AP_CRONJOB_EDIT = "Edit a CronJob's schedule, suspend/resume it and edit its env vars"
 permissionDescription AP_CRONJOB_DELETE = "Delete CronJobs"
+permissionDescription AP_CONFIG_PILOT_RELEASE = "Create and run staggered ConfigPilot config releases"
 
 -- 'permissionName' MUST match 'autopilotPermissionToText' for the same
 -- constructor; the RBAC check compares this string against the DB.
@@ -311,3 +315,7 @@ instance KnownPermission 'AP_CRONJOB_EDIT where
 instance KnownPermission 'AP_CRONJOB_DELETE where
   permissionProduct _ = "autopilot"
   permissionName _ = "CRONJOB_DELETE"
+
+instance KnownPermission 'AP_CONFIG_PILOT_RELEASE where
+  permissionProduct _ = "autopilot"
+  permissionName _ = "CONFIG_PILOT_RELEASE"
