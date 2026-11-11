@@ -135,6 +135,7 @@ isManagerRestrictedPerm (AutopilotPerm p) =
                , AP_RELEASE_CREATE_STANDALONE
                , AP_HPA_GUARDRAIL_EDIT
                , AP_CRONJOB_DELETE
+               , AP_CONFIG_PILOT_RELEASE
                ]
 isManagerRestrictedPerm (MobilePerm p) = p == MB_MOBILE_APP_MANAGE
 isManagerRestrictedPerm (OtaPerm p) =

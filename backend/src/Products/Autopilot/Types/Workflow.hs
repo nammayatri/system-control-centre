@@ -27,6 +27,8 @@ data ReleaseCategory
       VSEdit
     | -- | Mobile app builds triggered via GitHub Actions.
       MobileBuild
+    | -- | Staggered ConfigPilot config rollouts driven through the dashboards.
+      ConfigPilot
     deriving (Eq, Show, Read, Generic, Ord, Enum, Bounded)
 
 instance ToJSON ReleaseCategory
@@ -39,6 +41,7 @@ getDefaultDeploymentTarget BackendScheduler = "kubernetes"
 getDefaultDeploymentTarget BackendConfig = "kubernetes-config"
 getDefaultDeploymentTarget VSEdit = "kubernetes"
 getDefaultDeploymentTarget MobileBuild = "github-actions"
+getDefaultDeploymentTarget ConfigPilot = "configpilot"
 
 {- | Generic release workflow stages. Category-specific sub-stages live
 in @targetState@.

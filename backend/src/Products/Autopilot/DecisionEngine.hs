@@ -16,6 +16,7 @@ module Products.Autopilot.DecisionEngine
     stopDecisionEngineHS,
     getABDecision,
     getHSDecision,
+    getHSDecisionIgnoringSplit,
     getCombinedDecision,
 
     -- * Types
@@ -445,7 +446,13 @@ extractCluster tracker = case releaseContext tracker of
 -- @{runId}-post@. Gated by @ab_hs_enabled@; HTTP errors honour
 -- @decision_engine_fail_closed@.
 getHSDecision :: (MonadFlow m) => Config -> ReleaseTracker -> Bool -> m DecisionResult
-getHSDecision cfg tracker isPostMonitoring = do
+getHSDecision = getHSDecisionWith False
+
+getHSDecisionIgnoringSplit :: (MonadFlow m) => Config -> ReleaseTracker -> m DecisionResult
+getHSDecisionIgnoringSplit cfg tracker = getHSDecisionWith True cfg tracker False
+
+getHSDecisionWith :: (MonadFlow m) => Bool -> Config -> ReleaseTracker -> Bool -> m DecisionResult
+getHSDecisionWith ignoreSplit cfg tracker isPostMonitoring = do
   enabled <- getConfigBoolForProduct "ab_hs_enabled" (Just (appGroup tracker)) False
   if not enabled
     then pure (DecisionResult Continue Nothing "HEALTH_SCORE")
@@ -464,10 +471,10 @@ getHSDecision cfg tracker isPostMonitoring = do
                 if isPostMonitoring
                   then releaseId tracker <> "-post"
                   else releaseId tracker
-          liftIO $ pollHSDecision hsUrl apiKey diffMins runId failClosed minA minB
+          liftIO $ pollHSDecision ignoreSplit hsUrl apiKey diffMins runId failClosed minA minB
 
-pollHSDecision :: String -> Text -> Int -> Text -> Bool -> Int -> Int -> IO DecisionResult
-pollHSDecision hsUrl apiKey diffMins runId failClosed minA minB = do
+pollHSDecision :: Bool -> String -> Text -> Int -> Text -> Bool -> Int -> Int -> IO DecisionResult
+pollHSDecision ignoreSplit hsUrl apiKey diffMins runId failClosed minA minB = do
   let url = ensureSlash (T.pack hsUrl) <> "get/ab/decision/" <> runId
       body =
         object
@@ -490,7 +497,7 @@ pollHSDecision hsUrl apiKey diffMins runId failClosed minA minB = do
   case result of
     Right HttpResponse {respStatus = s, respBody = b} | s < 400 ->
       case A.decodeStrict' (LBS.toStrict b) :: Maybe Value of
-        Just v -> parseDecisionResponseWithVolume v "HEALTH_SCORE" minA minB
+        Just v -> parseDecisionResponseWithVolume ignoreSplit v "HEALTH_SCORE" minA minB
         Nothing -> do
           logWarningG "[DECISION] HS response: JSON decode error"
           pure (failOrContinue failClosed "HEALTH_SCORE" "HS JSON decode error")
@@ -531,8 +538,8 @@ getCombinedDecision ab hs =
 -- The primary @decision@ field is int-encoded (0 Continue, 1 Abort, 2 Wait,
 -- 3 WaitForMoreIteration); a string fallback recognises the same names.
 -- Missing field is treated as Continue (fail-open parse error).
-parseDecisionResponseWithVolume :: Value -> Text -> Int -> Int -> IO DecisionResult
-parseDecisionResponseWithVolume (Object obj) source minA minB = do
+parseDecisionResponseWithVolume :: Bool -> Value -> Text -> Int -> Int -> IO DecisionResult
+parseDecisionResponseWithVolume ignoreSplit (Object obj) source minA minB = do
   let rawDecision = case KM.lookup (K.fromText "decision") obj of
         Just (Number n) -> case toBoundedInteger n :: Maybe Int of
           Just 0 -> Continue
@@ -589,6 +596,7 @@ parseDecisionResponseWithVolume (Object obj) source minA minB = do
         _ -> False
 
       splitBreach = case (actualSplit, targetSplit) of
+        _ | ignoreSplit -> False
         (Just actual, Just target) ->
           let buf = maybe 5.0 id splitBuffer
            in actual < (target - buf) || actual > (target + buf)
@@ -644,6 +652,6 @@ parseDecisionResponseWithVolume (Object obj) source minA minB = do
                 <> ")"
         | otherwise = reason
   pure (DecisionResult decision finalReason source)
-parseDecisionResponseWithVolume _ source _ _ = do
+parseDecisionResponseWithVolume _ _ source _ _ = do
   logWarningG $ "[DECISION] Could not parse decision response for " <> source
   pure (DecisionResult Continue (Just "Invalid response format") source)

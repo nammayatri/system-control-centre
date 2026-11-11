@@ -12,6 +12,7 @@ import Data.Text (Text)
 import GHC.Int (Int32)
 import Products.Autopilot.Actions.ABValidation as ABValidation
 import Products.Autopilot.Actions.Config as Config
+import Products.Autopilot.Actions.ConfigPilotRelease as ConfigPilotRelease
 import Products.Autopilot.Actions.ConfigMap as ConfigMap
 import Products.Autopilot.Actions.K8sResource as K8sResource
 import Products.Autopilot.Actions.QaAutomation as QaAutomation
@@ -139,6 +140,7 @@ type CoreAPI =
         -- Stagger info — called by AB engine to learn current traffic % on version B.
         -- UNAUTHENTICATED: the AB engine has no SCC credentials.
         :<|> "release" :> "staggerInfo" :> Capture "releaseId" Text :> Get '[JSON] Value
+        :<|> "config-releases" :> Header "X-ConfigPilot-Key" Text :> ReqBody '[JSON] CreateConfigReleaseReq :> Post '[JSON] APIResponse
         -- AB validation (static path first so it doesn't conflict with release captures)
         :<|> "releases" :> Protected 'AP_RELEASE_VIEW :> "abstatus" :> QueryParam "from" Text :> QueryParam "to" Text :> QueryParam "product" Text :> Get '[JSON] Value
         :<|> "releases" :> Protected 'AP_RELEASE_VIEW :> Capture "releaseId" Text :> "ab" :> Get '[JSON] Value
@@ -271,6 +273,7 @@ coreServer =
         :<|> Release.decisionWebhookH
         -- Stagger info for AB engine
         :<|> Release.staggerInfoH
+        :<|> ConfigPilotRelease.createConfigReleaseH
         -- AB validation
         :<|> ABValidation.getABMetricsH
         :<|> ABValidation.getValidABStatusesH

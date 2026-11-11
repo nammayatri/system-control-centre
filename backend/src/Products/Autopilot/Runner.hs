@@ -47,6 +47,7 @@ import Products.Autopilot.Types.Storage.Schema (DeploymentConfig, ReleaseEvent, 
 import Products.Autopilot.Types.Target (TargetState (..))
 import Products.Autopilot.Types.Target.Kubernetes (K8sDeploymentState (..), K8sReleaseContext (..), PodsScaleDownStatus (..))
 import Products.Autopilot.Types.Target.Kubernetes qualified as K8s
+import Products.Autopilot.Workflow.ConfigPilotWorkflow (abortConfigPilotRelease)
 import Products.Autopilot.Workflow.Factory (executeReleaseWorkflow)
 import Products.Autopilot.Workflow.Types (ReleaseState (..), WorkFlowError (..))
 import System.IO.Unsafe (unsafePerformIO)
@@ -353,6 +354,7 @@ isEligibleToRun products multiRelease ongoing (rt, mts) = case category rt of
     BackendService -> k8sEligible
     BackendScheduler -> k8sEligible
     BackendConfig -> pure True
+    ConfigPilot -> pure True
     VSEdit -> pure True
     MobileBuild -> pure True
   where
@@ -541,7 +543,7 @@ runReleaseWorkflow _cfg rtNew mts = do
                     logInfo $ "[RUNNER] Workflow exited due to user abort — deferring: " <> releaseId rt
                     insertReleaseEvent (releaseId rt) "BUSINESS" "WORKFLOW_ABORT_EXIT" (toJSON (show err))
                 else
-                  if category rt `elem` [BackendService, BackendScheduler]
+                  if category rt `elem` [BackendService, BackendScheduler, ConfigPilot]
                     then do
                         -- Never terminalize before traffic is restored. Writing ABORTED
                         -- first meant a restore that couldn't finish (old not Ready yet)
@@ -1035,6 +1037,19 @@ handleAbortingRelease cfg rt mts = do
         -- old up and only switches traffic once it's fully ready, returning
         -- False while it's still waiting. Finalizing on that False would
         -- terminalize the release with traffic never actually restored.
+        ConfigPilot -> do
+            ok <- abortConfigPilotRelease cfg rt
+            if ok
+                then pure True
+                else do
+                    let abortedAt = maybe (fromMaybe now (NT.lastUpdated rt)) reCreatedAt mAbortTrigger
+                    if diffUTCTime now abortedAt < ghCancelDeadline
+                        then do
+                            logWarning $ "[handleAbortingRelease] " <> releaseId rt <> " config rollout abort incomplete, retrying on the next sweep"
+                            pure False
+                        else do
+                            insertReleaseEvent (releaseId rt) "BUSINESS" "CONFIG_ABORT_UNRESOLVED" (object ["message" .= ("Config rollout abort did not succeed within the deadline; verify the rollout state on the dashboards" :: T.Text)])
+                            pure True
         _ -> do
             vsRestored <- restoreVsTrafficOnFailure cfg rt mts
             if vsRestored
