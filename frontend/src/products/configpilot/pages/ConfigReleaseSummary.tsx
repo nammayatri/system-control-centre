@@ -49,6 +49,7 @@ const ConfigReleaseSummary: React.FC = () => {
   const confirm = useConfirm();
   const [tab, setTab] = useState('Summary');
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
+  const [openItems, setOpenItems] = useState<Set<string>>(new Set());
 
   const { data: release, isLoading, isFetching, refetch } = useQuery({
     queryKey: ['config-release', id],
@@ -202,11 +203,13 @@ const ConfigReleaseSummary: React.FC = () => {
                     <th className="px-4 py-2">Config type</th>
                     <th className="px-4 py-2">Version</th>
                     <th className="px-4 py-2">State</th>
+                    <th className="px-4 py-2">Change</th>
                   </tr>
                 </thead>
                 <tbody>
                   {meta.items.map(item => (
-                    <tr key={item.configType} className="border-b border-zinc-100 last:border-0">
+                    <Fragment key={item.configType}>
+                    <tr className="border-b border-zinc-100 last:border-0">
                       <td className="px-4 py-2 text-zinc-800">{item.configType}</td>
                       <td className="px-4 py-2 font-mono text-xs">v{item.version}</td>
                       <td className="px-4 py-2">
@@ -214,10 +217,28 @@ const ConfigReleaseSummary: React.FC = () => {
                           ? <Badge variant="success" size="sm">Concluded</Badge>
                           : <Badge variant="default" size="sm">{s === 'COMPLETED' ? 'Concluded' : 'Pending'}</Badge>}
                       </td>
+                      <td className="px-4 py-2">
+                        <button
+                          className="text-xs text-blue-600 hover:underline cursor-pointer"
+                          onClick={() => setOpenItems(prev => { const n = new Set(prev); if (n.has(item.configType)) n.delete(item.configType); else n.add(item.configType); return n; })}
+                        >
+                          {openItems.has(item.configType) ? 'Hide patch' : 'Show patch'}
+                        </button>
+                      </td>
                     </tr>
+                    {openItems.has(item.configType) && (
+                      <tr className="bg-zinc-50 border-b border-zinc-100">
+                        <td colSpan={4} className="px-4 py-3">
+                          {item.patch == null
+                            ? <span className="text-xs text-zinc-400">Patch was not available when the release was created.</span>
+                            : <pre className="text-xs font-mono bg-white text-zinc-800 border border-zinc-200 p-3 rounded-lg overflow-x-auto max-h-80 whitespace-pre-wrap break-all">{JSON.stringify(item.patch, null, 2)}</pre>}
+                        </td>
+                      </tr>
+                    )}
+                    </Fragment>
                   ))}
                   {meta.items.length === 0 && (
-                    <tr><td colSpan={3} className="px-4 py-6 text-center text-zinc-400">No items recorded.</td></tr>
+                    <tr><td colSpan={4} className="px-4 py-6 text-center text-zinc-400">No items recorded.</td></tr>
                   )}
                 </tbody>
               </table>

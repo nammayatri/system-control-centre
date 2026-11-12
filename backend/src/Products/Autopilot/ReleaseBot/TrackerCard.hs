@@ -30,7 +30,9 @@ import Products.Autopilot.ReleaseBot.PublicLink (requestIdOfGlobalId)
 import Products.Autopilot.ReleaseBot.Sql (countStatements, sqlFromCompare, statementsFor)
 import Products.Autopilot.ReleaseBot.Store (Req (..), dField, dText, getRequest)
 import Products.Autopilot.ReleaseBot.Xyne qualified as X
+import Products.Autopilot.ConfigPilot.Client qualified as CP
 import Products.Autopilot.Types.Release (ReleaseTracker (..))
+import Products.Autopilot.Types.Workflow (ReleaseCategory (..))
 import Products.Autopilot.Types.Storage.Schema (reLabel, rePayload)
 
 -- | Post the card into the tracker message's thread and remember where it is.
@@ -39,13 +41,16 @@ postTrackerCard t channel threadTs mConv = do
   conv <- maybe (X.conversationIdOf channel threadTs) (pure . Just) mConv
   logInfoG ("[tracker-card] " <> releaseId t <> " thread conversation: " <> fromMaybe "unknown (using message ts)" conv)
   let conversation = fromMaybe threadTs conv
-  facts <- trackerFacts t
+  facts <- if category t == ConfigPilot then pure [] else trackerFacts t
   logInfoG ("[tracker-card] " <> releaseId t <> " facts: " <> T.intercalate " | " facts)
   let tid = releaseId t
+      versionText = case (category t, CP.parseConfigPilotMeta t) of
+        (ConfigPilot, Right m) -> "Configs: " <> T.intercalate ", " [CP.configType i <> " v" <> T.pack (show (CP.version i)) | i <- CP.items m]
+        _ -> "Version: `" <> oldVersion t <> "` → `" <> newVersion t <> "`"
       text =
         T.intercalate "\n" $
           [ "Release approval — " <> service t <> " (" <> env t <> ")",
-            "Version: `" <> oldVersion t <> "` → `" <> newVersion t <> "`"
+            versionText
           ]
             ++ facts
             ++ ["Approving starts the rollout."]

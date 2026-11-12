@@ -3,6 +3,7 @@ import type { APRelease } from '../releases/api';
 export interface ConfigReleaseItem {
   configType: string;
   version: number;
+  patch: unknown | null;
 }
 
 export interface ConfigReleaseMeta {
@@ -20,7 +21,7 @@ export function parseConfigReleaseMeta(release: APRelease): ConfigReleaseMeta {
     merchantShortId: typeof m.merchantShortId === 'string' ? m.merchantShortId : '',
     city: typeof m.city === 'string' ? m.city : '',
     items: Array.isArray(m.items)
-      ? m.items.filter((i: any) => i && typeof i.configType === 'string').map((i: any) => ({ configType: i.configType, version: Number(i.version) }))
+      ? m.items.filter((i: any) => i && typeof i.configType === 'string').map((i: any) => ({ configType: i.configType, version: Number(i.version), patch: i.patch ?? null }))
       : [],
     concluded: Array.isArray(m.concluded) ? m.concluded.filter((c: any) => typeof c === 'string') : [],
   };

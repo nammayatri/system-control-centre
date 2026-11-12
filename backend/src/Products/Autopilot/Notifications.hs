@@ -64,6 +64,7 @@ import Core.Types.Time (Seconds (..))
 import Data.Aeson (Value (..), decode, encode, object, (.=))
 import Data.Aeson.Key qualified as K
 import Data.Aeson.KeyMap qualified as KM
+import Data.Foldable qualified as F
 import Data.Maybe (fromMaybe, isJust, listToMaybe, mapMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -75,11 +76,12 @@ import Products.Autopilot.Mobile.Types (MobileBuildContext (..), MobileBuildTarg
 import Products.Autopilot.QaAutomation (dispatchAutoQaRun)
 import Products.Autopilot.Queries.ProductService (findProductByName, getRepoNameDirect, getSlackChannelDirect)
 import Products.Autopilot.Queries.ReleaseTracker qualified as RTQ
+import Products.Autopilot.ConfigPilot.Client qualified as CP
 import Products.Autopilot.ReleaseBot.TrackerCard (closeTrackerCard, postTrackerCard)
 import Products.Autopilot.ReleaseChangelog (generateBackendChangelog)
 import Products.Autopilot.RuntimeConfig (getDecisionNotificationDedupMinutes, getMobileSlackChannel, isSlackEnabled)
 import Products.Autopilot.Sync (triggerSyncIfEnabled)
-import Products.Autopilot.Types.Release (ReleaseStatus (..), ReleaseTracker (..))
+import Products.Autopilot.Types.Release (ReleaseStatus (..), ReleaseTracker (..), RolloutStep (..))
 import Products.Autopilot.Types.Storage.Schema (rePayload)
 import Products.Autopilot.Types.Target (TargetState (..))
 import Products.Autopilot.Types.Target.Kubernetes (K8sDeploymentState (context), K8sReleaseContext (changelogSlackOptIn))
@@ -478,7 +480,50 @@ releaseLink t = do
   pure $ "<" <> url <> "|" <> appGroup t <> " | " <> service t <> " | " <> env t <> " Release>"
 
 versionLine :: ReleaseTracker -> Text
-versionLine t = oldVersion t <> " → " <> newVersion t <> " | " <> createdBy t
+versionLine t
+  | category t == ConfigPilot = "Config release | " <> createdBy t
+  | otherwise = oldVersion t <> " → " <> newVersion t <> " | " <> createdBy t
+
+cpMeta :: ReleaseTracker -> Maybe CP.ConfigPilotMeta
+cpMeta t = either (const Nothing) Just (CP.parseConfigPilotMeta t)
+
+cpItemLabel :: CP.ConfigPilotItem -> Text
+cpItemLabel i = CP.configType i <> " v" <> T.pack (show (CP.version i))
+
+cpItemsSummary :: ReleaseTracker -> Text
+cpItemsSummary t = maybe "no items recorded" (T.intercalate ", " . map cpItemLabel . CP.items) (cpMeta t)
+
+cpPatchText :: Maybe Value -> Text
+cpPatchText Nothing = "patch unavailable"
+cpPatchText (Just (Array xs)) = T.intercalate "\n" (map cpCompact (F.toList xs))
+cpPatchText (Just v) = cpCompact v
+
+cpCompact :: Value -> Text
+cpCompact = TL.toStrict . TLE.decodeUtf8 . encode
+
+cpStaggerPlan :: ReleaseTracker -> Text
+cpStaggerPlan t = T.intercalate " → " [T.pack (show (rolloutPercent s)) <> "%" | s <- rolloutStrategy t]
+
+cpCreatedBlocks :: ReleaseTracker -> [Value]
+cpCreatedBlocks t = case cpMeta t of
+  Nothing -> []
+  Just m ->
+    let items = CP.items m
+        shown = take 10 items
+        extra = length items - length shown
+        header =
+          sectionBlock
+            ( "*"
+                <> T.pack (show (length items))
+                <> (if length items == 1 then " config" else " configs")
+                <> "* for "
+                <> (if CP.side m == CP.BAP then "Rider" else "Driver")
+                <> " · "
+                <> CP.city m
+            )
+        itemBlocks = concatMap (\i -> [sectionBlock ("*" <> cpItemLabel i <> "*"), sectionBlock ("```" <> truncateT 2600 (cpPatchText (CP.patch i)) <> "```")]) shown
+        more = [contextBlock ["+" <> T.pack (show extra) <> " more, see the release page"] | extra > 0]
+     in [header] <> itemBlocks <> more <> [contextBlock ["Stagger: " <> cpStaggerPlan t]]
 
 -- | Send the CREATED Slack message SYNCHRONOUSLY. Every subsequent
 -- notification threads under this message via thread_ts, so we must block
@@ -496,13 +541,13 @@ notifyReleaseCreated tracker = do
       let clBlocks = case changeLog tracker of
             Just cl | not (T.null (T.strip cl)) -> [contextBlock [cl]]
             _ -> []
-          blocks = [sectionBlock link, sectionBlock (versionLine tracker), contextBlock ["Cloud: " <> cloud]] <> clBlocks
+          blocks = [sectionBlock link, sectionBlock (versionLine tracker), contextBlock ["Cloud: " <> cloud]] <> clBlocks <> (if category tracker == ConfigPilot then cpCreatedBlocks tracker else [])
       mTs <- either (const Nothing) Just <$> sendSlackRichFull channel (appGroup tracker <> " | " <> service tracker) colorCreated blocks Nothing
       case mTs of
         Just (ts, conv) -> do
           saveThreadTs (releaseId tracker) ts
           -- Approve / Discard card in this message's thread, for every backend release.
-          when (category tracker `elem` [BackendService, BackendScheduler] && not (isApproved tracker)) $
+          when (category tracker `elem` [BackendService, BackendScheduler, ConfigPilot] && not (isApproved tracker)) $
             void (forkFlow (postTrackerCard tracker channel ts conv))
         Nothing -> pure ()
 
@@ -519,10 +564,15 @@ notifyReleaseProgress tracker percentage = whenSlackEnabled $
   withChannel (appGroup tracker) (service tracker) $ \channel -> do
     threadTs <- resolveThreadTs tracker
     let pct = T.pack (show percentage)
-        blocks =
-          [ sectionBlock ("*INPROGRESS*  " <> pct <> "%"),
-            contextBlock ["Routing " <> pct <> "% traffic to `" <> newVersion tracker <> "` | " <> T.pack (show (100 - percentage)) <> "% on `" <> oldVersion tracker <> "`"]
-          ]
+        blocks
+          | category tracker == ConfigPilot =
+              [ sectionBlock ("*INPROGRESS*  " <> pct <> "%"),
+                contextBlock ["Serving " <> pct <> "% of requests the new versions: " <> cpItemsSummary tracker <> " | the rest stay on base"]
+              ]
+          | otherwise =
+              [ sectionBlock ("*INPROGRESS*  " <> pct <> "%"),
+                contextBlock ["Routing " <> pct <> "% traffic to `" <> newVersion tracker <> "` | " <> T.pack (show (100 - percentage)) <> "% on `" <> oldVersion tracker <> "`"]
+              ]
     _ <- sendSlackRich channel ("INPROGRESS " <> pct <> "%") colorInProgress blocks threadTs
     pure ()
 
@@ -531,10 +581,15 @@ notifyReleaseCompleted tracker mts = do
   whenSlackEnabled $
     withChannel (appGroup tracker) (service tracker) $ \channel -> do
       threadTs <- resolveThreadTs tracker
-      let blocks =
-            [ sectionBlock "*COMPLETED*  100%",
-              contextBlock ["All traffic on `" <> newVersion tracker <> "`"]
-            ]
+      let blocks
+            | category tracker == ConfigPilot =
+                [ sectionBlock "*COMPLETED*  100%",
+                  contextBlock ["Now the base config: " <> cpItemsSummary tracker]
+                ]
+            | otherwise =
+                [ sectionBlock "*COMPLETED*  100%",
+                  contextBlock ["All traffic on `" <> newVersion tracker <> "`"]
+                ]
       _ <- sendSlackRich channel "COMPLETED" colorCompleted blocks threadTs
       pure ()
   -- Opt-in AI changelog notes, threaded under the same message. Runs in its own
@@ -601,10 +656,15 @@ notifyReleaseAborted tracker = do
   whenSlackEnabled $
     withChannel (appGroup tracker) (service tracker) $ \channel -> do
       threadTs <- resolveThreadTs tracker
-      let blocks =
-            [ sectionBlock "*ABORTED*",
-              contextBlock ["Traffic restored to `" <> oldVersion tracker <> "`"]
-            ]
+      let blocks
+            | category tracker == ConfigPilot =
+                [ sectionBlock "*ABORTED*",
+                  contextBlock ["Experiments stopped, nothing written to the config tables: " <> cpItemsSummary tracker]
+                ]
+            | otherwise =
+                [ sectionBlock "*ABORTED*",
+                  contextBlock ["Traffic restored to `" <> oldVersion tracker <> "`"]
+                ]
       _ <- sendSlackRich channel "ABORTED" colorAborted blocks threadTs
       pure ()
   dispatchTerminalWebhooks tracker

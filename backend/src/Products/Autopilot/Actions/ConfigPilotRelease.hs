@@ -12,7 +12,7 @@ import Control.Monad.Catch (onException, throwM)
 import Control.Monad.IO.Class (liftIO)
 import Core.AppError (APIError (..))
 import Core.Secrets (lookupEnvSecret)
-import Core.Environment (Flow, logInfo)
+import Core.Environment (Flow, getConfig, logInfo)
 import Data.Aeson (FromJSON (..), ToJSON (..), genericParseJSON, genericToJSON, toJSON)
 import Data.Aeson qualified as A
 import Data.Char (toLower)
@@ -25,7 +25,7 @@ import Data.UUID qualified as UUID
 import Data.UUID.V4 qualified as UUID
 import GHC.Generics (Generic)
 import Products.Autopilot.Actions.Release (insertReleaseTrackerSafe)
-import Products.Autopilot.ConfigPilot.Client (ConfigPilotItem (..), ConfigPilotMeta (..), ConfigSide (..))
+import Products.Autopilot.ConfigPilot.Client (ConfigPilotItem (..), ConfigPilotMeta (..), ConfigSide (..), fetchItemPatch)
 import Products.Autopilot.Notifications (notifyReleaseCreated)
 import Products.Autopilot.Queries.ProductService
   ( claimServiceForModification,
@@ -116,13 +116,16 @@ createAuthorised req = do
             else do
               rid <- liftIO (UUID.toText <$> UUID.nextRandom)
               now <- liftIO getCurrentTime
-              let meta =
+              cfg <- getConfig
+              let bareMeta =
                     ConfigPilotMeta
                       { side = ccrSide req,
                         merchantShortId = ccrMerchantShortId req,
                         city = ccrCity req,
                         items = ccrItems req
                       }
+              withPatches <- mapM (\i -> either (const i {patch = Nothing}) (\p -> i {patch = Just p}) <$> fetchItemPatch cfg bareMeta i {patch = Nothing}) (ccrItems req)
+              let meta = bareMeta {items = withPatches}
                   reqMode = if fmap T.toUpper (ccrMode req) == Just "MANUAL" then MANUAL else AUTO
                   datePart = T.pack (formatTime defaultTimeLocale "%Y%m%d" now)
                   tracker =

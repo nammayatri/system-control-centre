@@ -6,6 +6,7 @@ module Products.Autopilot.ConfigPilot.Client
     ConfigPilotMeta (..),
     ConfigSide (..),
     parseConfigPilotMeta,
+    fetchItemPatch,
     upsertItemRollout,
     concludeItem,
     abortItem,
@@ -18,9 +19,12 @@ import Core.Config (Config (..))
 import Core.Http.Client (HttpError, HttpReq (..), HttpResponse (..), Method (..), defaultReq, httpRaw)
 import Core.Secrets (lookupEnvSecret)
 import Core.Types.Time (Seconds (..))
-import Data.Aeson (FromJSON, ToJSON, Value, object, (.=))
+import Data.Aeson (FromJSON, ToJSON, Value (..), object, (.=))
 import Data.Aeson qualified as A
 import Data.ByteString.Lazy qualified as LBS
+import Data.Aeson.Key qualified as K
+import Data.Aeson.KeyMap qualified as KM
+import Data.Foldable (toList)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
@@ -38,7 +42,8 @@ instance FromJSON ConfigSide
 
 data ConfigPilotItem = ConfigPilotItem
   { configType :: Text,
-    version :: Int
+    version :: Int,
+    patch :: Maybe Value
   }
   deriving (Eq, Show, Generic)
 
@@ -139,3 +144,31 @@ abortItem :: (MonadIO m) => Config -> ConfigPilotMeta -> ConfigPilotItem -> m (E
 abortItem cfg meta item =
   postDashboard cfg meta item "rolloutAction" $
     object ["tag" .= ("ConfigPilotAbort" :: Text), "contents" .= object ["version" .= version item]]
+
+fetchItemPatch :: (MonadIO m) => Config -> ConfigPilotMeta -> ConfigPilotItem -> m (Either Text Value)
+fetchItemPatch cfg meta item
+  | null (baseUrlFor cfg (side meta)) = pure (Left "ConfigPilot dashboard URL is not configured")
+  | otherwise = do
+      mToken <- lookupEnvSecret "SC_CONFIGPILOT_TOKEN"
+      case mToken of
+        Nothing -> pure (Left "SC_CONFIGPILOT_TOKEN is not set")
+        Just token -> liftIO $ do
+          let req =
+                (defaultReq (itemUrl cfg meta item "configDetails"))
+                  { reqHeaders = [("token", token)],
+                    reqTimeout = Seconds 30,
+                    reqRetries = 2,
+                    reqLogTag = "configpilot"
+                  }
+          r <- try (httpRaw req) :: IO (Either SomeException (Either HttpError HttpResponse))
+          pure $ case r of
+            Right (Right HttpResponse {respStatus = s, respBody = b}) | s < 300 ->
+              case A.decode b of
+                Just (Array entries) ->
+                  case [p | Object o <- toList entries, Just (Number n) <- [KM.lookup (K.fromText "version") o], round n == version item, Just p <- [KM.lookup (K.fromText "configPatch") o]] of
+                    (p : _) -> Right p
+                    [] -> Left ("version " <> T.pack (show (version item)) <> " not found in configDetails")
+                _ -> Left "configDetails returned an unexpected body"
+            Right (Right HttpResponse {respStatus = s}) -> Left ("configDetails HTTP " <> T.pack (show s))
+            Right (Left _) -> Left "configDetails request failed"
+            Left ex -> Left (T.pack (show ex))
