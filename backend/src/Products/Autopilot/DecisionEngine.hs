@@ -14,6 +14,7 @@ module Products.Autopilot.DecisionEngine
     checkPromQueries,
     initiateABDecisionForRelease,
     stopDecisionEngineHS,
+    stopAbRun,
     getABDecision,
     getHSDecision,
     getHSDecisionIgnoringSplit,
@@ -27,6 +28,7 @@ where
 
 import Control.Applicative ((<|>))
 import Control.Exception (SomeException, try)
+import Control.Monad (void)
 import Control.Monad.IO.Class (liftIO)
 import Core.Config (Config (..))
 import Core.Environment (MonadFlow)
@@ -340,10 +342,13 @@ fromMaybeT = maybe "" id
 -- | Best-effort POST @{abUrl}stop/ab/{run_id}@ to terminate the decision
 -- pod on abort/complete. Logs failures; never throws.
 stopDecisionEngineHS :: (MonadFlow m) => Config -> Text -> m ()
-stopDecisionEngineHS cfg runId = do
+stopDecisionEngineHS cfg runId = void (stopAbRun cfg runId)
+
+stopAbRun :: (MonadFlow m) => Config -> Text -> m Bool
+stopAbRun cfg runId = do
   let abUrl = abEngineUrl cfg
   if null abUrl || T.null runId
-    then pure ()
+    then pure True
     else do
       apiKey <- getABHSApiKey
       liftIO $ do
@@ -362,14 +367,18 @@ stopDecisionEngineHS cfg runId = do
         result <- try (httpRaw req) :: IO (Either SomeException (Either HttpError HttpResponse))
         case result of
           Right (Right HttpResponse {respStatus = s})
-            | s < 400 ->
+            | s < 400 -> do
                 logDebugG $ "[DECISION] Stopped AB engine for run_id " <> runId
-          Right (Right HttpResponse {respStatus = s}) ->
+                pure True
+          Right (Right HttpResponse {respStatus = s}) -> do
             logWarningG $ "[DECISION] Stop AB engine HTTP " <> T.pack (show s) <> " for " <> runId
-          Right (Left e) ->
+            pure False
+          Right (Left e) -> do
             logWarningG $ "[DECISION] Stop AB engine failed: " <> T.pack (show e)
-          Left e ->
+            pure False
+          Left e -> do
             logWarningG $ "[DECISION] Stop AB engine threw: " <> T.pack (show e)
+            pure False
 
 -- | Per-rollout-step AB read — structurally a no-op (always Continue). The
 -- AB pod's verdict arrives via 'getHSDecision'. Kept as a separate function
@@ -427,8 +436,12 @@ mkInitiateAbBody tracker cluster svcHost now =
                 "cluster" .= cluster,
                 "service" .= svcHost
               ],
-          "run_id" .= releaseId tracker
+          "run_id" .= releaseId tracker,
+          "self_closing_time" .= abSelfClosingMins
         ]
+
+abSelfClosingMins :: Int
+abSelfClosingMins = 30 * 60
 
 -- | "YYYY-mm-ddTHH:MM:SS" for the AB engine.
 formatStdTime :: UTCTime -> Text

@@ -26,6 +26,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time.Clock (NominalDiffTime, UTCTime, addUTCTime, diffUTCTime, getCurrentTime)
 import Products.Autopilot.AbortedVsAlert (sweepAbortedVsNotRestored)
+import Products.Autopilot.DecisionEngine (stopAbRun)
 import Products.Autopilot.EventLog (logAbortTriggered, logStatusUpdated, logTrafficUpdatedWithMessage)
 import Products.Autopilot.K8s.Deployment (buildScaleNamedDeploymentCommand, getDeploymentReplicaStatus)
 import Products.Autopilot.K8s.Execute (K8sError (..), isNotFoundError, runCmd)
@@ -340,6 +341,51 @@ loop = forever $ do
         -- loop also drives live releases. The sweep drops its own overlapping
         -- ticks, so forking can't double-alert.
         void $ forkFlow (sweepAbortedVsNotRestored cfg now)
+
+        -- Step 9: stop AB engine jobs of releases that reached a terminal
+        -- state. The AB engine never ends a job on its own, and only the
+        -- backend-service success path (and ConfigPilot) called stop/ab —
+        -- abort / failure / revert / discard leaked their jobs forever,
+        -- which is what pinned ab-system-v2 at 100% CPU. Forked, with the
+        -- same in-flight guard as the other steps.
+        abSweepClaimed <- liftIO $ claimRowInFlight abStopSweepKey
+        when abSweepClaimed $
+            void $
+                forkFlow (sweepStopAbForTerminalReleases cfg `MC.finally` liftIO (releaseRowInFlight abStopSweepKey))
+
+-- | In-flight key for 'sweepStopAbForTerminalReleases'.
+abStopSweepKey :: Text
+abStopSweepKey = "__ab_stop_sweep__"
+
+{- | Call @stop/ab/{releaseId}@ for terminal releases that have no
+@AB_ENGINE_STOPPED@ event yet, then record that event. Idempotent: the AB
+engine treats a run with no live jobs as a successful no-op, so releases
+that never used AB just get marked once. On the first failure (AB down) the
+sweep stops for this tick and retries on the next one — no marker is
+written, so nothing is lost. Bounded per tick so a backlog drains over a
+few polls instead of in one burst.
+-}
+sweepStopAbForTerminalReleases :: Config -> Flow ()
+sweepStopAbForTerminalReleases cfg = do
+    ids <- findReleaseIdsNeedingAbStop abStopSweepWindowDays abStopSweepBatch
+    go ids
+  where
+    go [] = pure ()
+    go (rid : rest) = do
+        ok <- stopAbRun cfg rid
+        if ok
+            then do
+                insertReleaseEvent rid "DECISION_ENGINE" "AB_ENGINE_STOPPED" (object ["by" .= ("runner-sweep" :: Text)])
+                go rest
+            else
+                logWarning $
+                    "[RUNNER] AB stop sweep: stop failed for " <> rid <> " — will retry next poll (" <> T.pack (show (length rest)) <> " more pending)"
+
+abStopSweepWindowDays :: Int
+abStopSweepWindowDays = 7
+
+abStopSweepBatch :: Int
+abStopSweepBatch = 25
 
 -- | Get the full AppState from the Flow monad (for passing to forkIO threads)
 getAppState :: Flow AppState
