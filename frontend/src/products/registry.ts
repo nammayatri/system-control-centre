@@ -89,6 +89,8 @@ import ReleaseSummary from './releases/pages/ReleaseSummary';
 import ListConfigMap from './configmap/pages/ListConfigMap';
 import CreateConfigMap from './configmap/pages/CreateConfigMap';
 import ConfigMapSummary from './configmap/pages/ConfigMapSummary';
+import ListConfigReleases from './configpilot/pages/ListConfigReleases';
+import ConfigReleaseSummary from './configpilot/pages/ConfigReleaseSummary';
 import Configurations from './config/pages/Configurations';
 import DeploymentConfig from './config/pages/DeploymentConfig';
 import ListVSEdit from './vs-editor/pages/ListVSEdit';
@@ -149,6 +151,7 @@ const backendProduct: ProductDefinition = {
     { label: 'Single Service Release', path: '/backend/releases/new', icon: 'Plus', permission: 'RELEASE_CREATE' },
     { label: 'Release Bundles',   path: '/backend/bundles',           icon: 'Layers' },
     { label: 'Config Maps',       path: '/backend/configmap',         icon: 'FileText' },
+    { label: 'Config Releases',   path: '/backend/config-releases',   icon: 'SlidersHorizontal' },
     { label: 'Deployment Config', path: '/backend/deployment-config', icon: 'Layers' },
     { label: 'VS Editor',         path: '/backend/vs-editor',         icon: 'Settings' },
     { label: 'HPA Manager',       path: '/backend/hpa',               icon: 'Gauge', permission: 'HPA_VIEW' },
@@ -170,6 +173,8 @@ const backendProduct: ProductDefinition = {
     { path: 'configmap',          component: ListConfigMap },
     { path: 'configmap/new',      component: CreateConfigMap, permission: 'RELEASE_CREATE' },
     { path: 'configmap/:id',      component: ConfigMapSummary },
+    { path: 'config-releases',    component: ListConfigReleases },
+    { path: 'config-releases/:id', component: ConfigReleaseSummary },
     { path: 'deployment-config',  component: DeploymentConfig },
     { path: 'vs-editor',          component: ListVSEdit },
     { path: 'vs-editor/new',      component: EditVS,         permission: 'RELEASE_CREATE' },
@@ -220,6 +225,11 @@ const backendProduct: ProductDefinition = {
       } else if (parts.length >= 3) {
         crumbs.push({ label: 'ConfigMap Details' });
       }
+      return crumbs;
+    }
+    if (parts[1] === 'config-releases') {
+      crumbs.push({ label: 'Config Releases', to: '/backend/config-releases' });
+      if (parts.length >= 3) crumbs.push({ label: 'Release Details' });
       return crumbs;
     }
     if (parts[1] === 'vs-editor') {

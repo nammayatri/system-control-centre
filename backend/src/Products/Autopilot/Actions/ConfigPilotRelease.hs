@@ -57,7 +57,8 @@ data CreateConfigReleaseReq = CreateConfigReleaseReq
     ccrItems :: [ConfigPilotItem],
     ccrRolloutStrategy :: [RolloutStep],
     ccrMode :: Maybe Text,
-    ccrDescription :: Maybe Text
+    ccrDescription :: Maybe Text,
+    ccrCreatedBy :: Maybe Text
   }
   deriving (Show, Generic)
 
@@ -134,7 +135,7 @@ createAuthorised req = do
                         status = CREATED,
                         releaseWFStatus = INIT,
                         mode = reqMode,
-                        createdBy = "control-center",
+                        createdBy = maybe "control-center" id (ccrCreatedBy req),
                         approvedBy = Nothing,
                         isApproved = False,
                         isInfraApproved = True,

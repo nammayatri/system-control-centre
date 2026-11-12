@@ -552,7 +552,7 @@ export function statusColor(status: ReleaseStatus | string): string {
  * the matching ReleaseCategory variants. Pass `undefined`/omit for no
  * filter.
  */
-export type ReleaseCategoryFilter = 'backend' | 'mobile' | undefined;
+export type ReleaseCategoryFilter = 'backend' | 'mobile' | 'configpilot' | undefined;
 
 export async function fetchAPReleases(
     from: string,

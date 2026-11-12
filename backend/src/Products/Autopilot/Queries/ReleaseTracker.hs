@@ -814,6 +814,7 @@ listReleaseTrackersByDateRangeAndCategory fromTime toTime mCategoryWhitelist = w
                                 -- own sections in the UI.
                                 guard_ (rtCategory rt /=. val_ "VSEdit")
                                 guard_ (rtCategory rt /=. val_ "BackendConfig")
+                                guard_ (rtCategory rt /=. val_ "ConfigPilot")
                         pure rt
     pure (map fromRow (hideExternalReviewSnapshots rows))
 

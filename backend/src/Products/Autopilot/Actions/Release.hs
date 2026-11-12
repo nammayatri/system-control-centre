@@ -305,6 +305,7 @@ listReleasesH _ap mFrom mTo mCategory = do
     -- caller is asking for it explicitly).
     categoryWhitelist :: Maybe Text -> Maybe [Text]
     categoryWhitelist (Just "mobile") = Just ["MobileBuild"]
+    categoryWhitelist (Just "configpilot") = Just ["ConfigPilot"]
     categoryWhitelist (Just "backend") =
       Just ["BackendService", "BackendScheduler", "BackendConfig"]
     categoryWhitelist _ = Nothing
