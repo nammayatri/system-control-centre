@@ -13,6 +13,8 @@ module Products.Autopilot.Actions.VSEdit
     forceUnlockVsEditTrackerH,
     revertVsEditTrackerH,
     fetchCurrentVsH,
+    fetchCurrentVsAllH,
+    parseVsDoc,
   )
 where
 
@@ -27,12 +29,13 @@ import Core.Environment (Flow, getConfig, getDBEnv)
 import Core.Logging (logInfoG)
 import Data.Aeson (Value (..), eitherDecode, object, toJSON, (.=))
 import Data.ByteString.Lazy.Char8 qualified as LBS
-import Data.List (find)
-import Data.Maybe (fromMaybe)
+import Data.List (find, sortOn)
+import Data.Maybe (catMaybes, fromMaybe)
+import Data.Ord (Down (..))
 import Data.Proxy (Proxy (..))
 import Data.Text (Text)
 import Data.Text qualified as T
-import Data.Text.Encoding (decodeUtf8)
+import Data.Text.Encoding (decodeUtf8, encodeUtf8)
 import Data.Time.Clock (UTCTime, addUTCTime, getCurrentTime)
 import Data.Time.Format (defaultTimeLocale, parseTimeM)
 import Data.UUID qualified as UUID
@@ -42,7 +45,7 @@ import Database.PostgreSQL.Simple qualified as PG
 import Products.Autopilot.K8s.Execute (K8sError (..), runCmd, shellQuote)
 import Products.Autopilot.K8s.VirtualService (getVirtualServiceJson)
 import Products.Autopilot.Notifications
-import Products.Autopilot.Queries.ProductService (findProductByNameAndCluster, getProductNamespace, getProductVsName, releaseVsLockIfOwner, tryAcquireVsLock, updateVsLockedBy)
+import Products.Autopilot.Queries.ProductService (findProductByNameAndCluster, getProductNamespace, getProductVsName, getProductVsNames, releaseVsLockIfOwner, tryAcquireVsLock, updateVsLockedBy)
 import Products.Autopilot.Queries.ReleaseTracker (conditionalUpdateTrackerRow, insertReleaseEvent, insertReleaseTrackerRow, listReleaseEvents)
 import Products.Autopilot.Queries.VsEditTracker
 import Products.Autopilot.Types.API
@@ -57,6 +60,82 @@ vsStatusCreated, vsStatusApplied, vsStatusDiscarded :: Text
 vsStatusCreated = "CREATED"
 vsStatusApplied = "APPLIED"
 vsStatusDiscarded = "DISCARDED"
+
+extraOldLabel, extraNewLabel :: Text -> Text
+extraOldLabel n = "VS_OLD:" <> n
+extraNewLabel n = "VS_NEW:" <> n
+
+latestSnapshot :: Text -> [S.ReleaseEvent] -> Maybe Text
+latestSnapshot label events =
+  case sortOn (Down . S.reCreatedAt) [e | e <- events, S.reCategory e == "SNAPSHOT", S.reLabel e == label] of
+    (e : _) -> case S.rePayload e of
+      String t -> Just t
+      _ -> Nothing
+    [] -> Nothing
+
+parseVsDoc :: Text -> Maybe Value
+parseVsDoc t = case Yaml.decodeEither' (encodeUtf8 t) of
+  Right v -> Just (stripK8sNoiseValue v)
+  Left _ -> Nothing
+
+vsTextToYaml :: Text -> Text
+vsTextToYaml vsText = case eitherDecode (LBS.pack (T.unpack vsText)) of
+  Right vsJson -> decodeUtf8 (Yaml.encode (stripK8sNoiseValue vsJson))
+  Left _ -> vsText
+
+fetchVsYamls :: Config -> Text -> [Text] -> IO (Either Text [(Text, Text)])
+fetchVsYamls _ _ [] = pure (Right [])
+fetchVsYamls cfg ns (n : rest) = do
+  r <- getVirtualServiceJson cfg ns n
+  case r of
+    Left err -> pure (Left ("Failed to fetch VirtualService " <> n <> ": " <> T.pack (show err)))
+    Right txt -> fmap ((n, vsTextToYaml txt) :) <$> fetchVsYamls cfg ns rest
+
+data VsTarget = VsTarget
+  { vtName :: Text,
+    vtNew :: Text,
+    vtRollback :: Maybe Text
+  }
+
+-- | Apply several VirtualServices as one unit. With more than one target every
+-- target is first validated with a server-side dry run; if a real apply still
+-- fails, the targets already applied are restored from their rollback content.
+applyVsTargets :: Config -> String -> [VsTarget] -> IO (Either Text ())
+applyVsTargets cfg ns targets = case targets of
+  [] -> pure (Right ())
+  [t] -> applyVsToK8s cfg ns (vtNew t)
+  _ -> do
+    dry <- dryRunAll targets
+    case dry of
+      Left e -> pure (Left e)
+      Right () -> applyEach [] targets
+  where
+    label t e = vtName t <> ": " <> e
+    dryRunAll [] = pure (Right ())
+    dryRunAll (t : ts) = do
+      r <- applyVsToK8sWith True cfg ns (vtNew t)
+      case r of
+        Left e -> pure (Left (label t e <> " (dry run; nothing was changed)"))
+        Right () -> dryRunAll ts
+    applyEach _ [] = pure (Right ())
+    applyEach done (t : ts) = do
+      r <- applyVsToK8s cfg ns (vtNew t)
+      case r of
+        Right () -> applyEach (t : done) ts
+        Left e -> do
+          failures <- catMaybes <$> mapM restore (reverse done)
+          let restoredNote
+                | null done = "no earlier VS had been changed"
+                | null failures = "earlier VS changes were rolled back"
+                | otherwise = "ROLLBACK INCOMPLETE: " <> T.intercalate "; " failures
+          pure (Left (label t e <> " (" <> restoredNote <> ")"))
+    restore t = case vtRollback t of
+      Nothing -> pure (Just (vtName t <> ": no snapshot to restore"))
+      Just old -> do
+        r <- applyVsToK8s cfg ns old
+        pure $ case r of
+          Left e -> Just (label t e)
+          Right () -> Nothing
 
 -- | Atomically clear the deployment_config VS lock AND flip every LOCKED
 -- VS-edit tracker row to UNLOCKED for the given app_group, in a single
@@ -303,14 +382,26 @@ updateVsEditTrackerH ap tid UpdateVsEditTrackerReq {..} = do
               }
       case status of
         Just s | s == vsStatusCreated -> do
-          -- Save-changes path: capture VS_NEW, VS stays locked until apply/discard.
-          case newVsData of
-            Just d -> insertReleaseEvent tid "SNAPSHOT" "VS_NEW" (String d)
-            Nothing -> pure ()
-          ok <- conditionalUpdateTrackerRow updated oldStatusText
-          if ok
-            then pure $ APIResponse "SUCCESS" "VS edit saved"
-            else pure $ APIResponse "ERROR" "VS edit was modified by another request. Please refresh and try again."
+          mCfgForExtras <- findProductByNameAndCluster (S.rtAppGroup existing) ""
+          let allowedExtras = maybe [] (drop 1 . getProductVsNames) mCfgForExtras
+              extras = fromMaybe [] extraVsData
+              unknownExtras = [nvdName e | e <- extras, nvdName e `notElem` allowedExtras]
+              emptyExtras = [nvdName e | e <- extras, T.null (T.strip (nvdContent e))]
+          if not (null unknownExtras)
+            then pure $ APIResponse "ERROR" ("VS not configured as an extra VS for this product: " <> T.intercalate ", " unknownExtras)
+            else
+              if not (null emptyExtras)
+                then pure $ APIResponse "ERROR" ("Empty VS data for: " <> T.intercalate ", " emptyExtras)
+                else do
+                  -- Save-changes path: capture VS_NEW, VS stays locked until apply/discard.
+                  case newVsData of
+                    Just d -> insertReleaseEvent tid "SNAPSHOT" "VS_NEW" (String d)
+                    Nothing -> pure ()
+                  mapM_ (\e -> insertReleaseEvent tid "SNAPSHOT" (extraNewLabel (nvdName e)) (String (nvdContent e))) extras
+                  ok <- conditionalUpdateTrackerRow updated oldStatusText
+                  if ok
+                    then pure $ APIResponse "SUCCESS" "VS edit saved"
+                    else pure $ APIResponse "ERROR" "VS edit was modified by another request. Please refresh and try again."
         Just s | s == vsStatusApplied -> do
           events <- listReleaseEvents tid
           let mNewVs = find (\e -> S.reCategory e == "SNAPSHOT" && S.reLabel e == "VS_NEW") events
@@ -332,7 +423,20 @@ updateVsEditTrackerH ap tid UpdateVsEditTrackerReq {..} = do
                       -- the tracker row; on CAS loss the VS is patched but DB
                       -- still says CREATED. Rare + recoverable by retry;
                       -- proper fix needs K8s-side idempotency.
-                      result <- liftIO $ applyVsToK8s cfg (T.unpack ns) vsContent
+                      let primaryOld = case find (\e -> S.reCategory e == "SNAPSHOT" && S.reLabel e == "VS_OLD") events of
+                            Just e -> case S.rePayload e of
+                              String t -> Just t
+                              _ -> Nothing
+                            Nothing -> Nothing
+                          extraTargets =
+                            [ VsTarget n new old
+                              | n <- drop 1 (getProductVsNames pCfg),
+                                Just new <- [latestSnapshot (extraNewLabel n) events],
+                                let old = latestSnapshot (extraOldLabel n) events,
+                                maybe True (/= new) old
+                            ]
+                          targets = VsTarget (getProductVsName pCfg) vsContent primaryOld : extraTargets
+                      result <- liftIO $ applyVsTargets cfg (T.unpack ns) targets
                       case result of
                         Left err -> pure $ APIResponse "ERROR" ("K8s apply failed: " <> err)
                         Right () -> do
@@ -380,31 +484,38 @@ lockVsEditTrackerH ap VsLockReq {..} = do
       resolvedEnv = fromMaybe (envName cfg) env
       resolvedService = fromMaybe "" service
       resolvedLockedBy = fromMaybe "admin" lockedBy
-  acquired <- tryAcquireVsLock appGroup resolvedLockedBy
-  if not acquired
-    then throwM (Conflict ("VS is already locked for app group " <> appGroup))
-    else do
-      tid <- liftIO (UUID.toText <$> UUID.nextRandom)
-      let durationSecs = fromIntegral (fromMaybe 15 lockDurationMinutes) * 60
-          lockExpiry = addUTCTime durationSecs now
-          row = mkVsEditRow (cloudProvider cfg) tid appGroup resolvedService resolvedEnv resolvedVsName (Just resolvedLockedBy) "LOCKED" now
-          rowWithExpiry = row {S.rtEndTime = Just lockExpiry}
-      insertReleaseTrackerRow rowWithExpiry
-      capturedOld <- case oldVsData of
-        Just d -> pure (Just d)
-        Nothing -> case mProdCfg of
-          Just pCfg | not (T.null resolvedVsName) -> do
-            let ns = getProductNamespace pCfg
-            result <- liftIO $ getVirtualServiceJson cfg ns resolvedVsName
-            case result of
-              Right vsText -> pure (Just vsText)
-              Left _ -> pure Nothing
-          _ -> pure Nothing
-      case capturedOld of
-        Just d -> insertReleaseEvent tid "SNAPSHOT" "VS_OLD" (String d)
-        Nothing -> pure ()
-      notifyVsEditLocked tid appGroup (fromMaybe "" service) (fromMaybe "admin" lockedBy)
-      pure $ APIResponse "SUCCESS" ("VS locked. Tracker ID: " <> tid)
+  extraOldResult <- case mProdCfg of
+    Just pCfg -> liftIO $ fetchVsYamls cfg (getProductNamespace pCfg) (drop 1 (getProductVsNames pCfg))
+    Nothing -> pure (Right [])
+  case extraOldResult of
+    Left err -> pure $ APIResponse "ERROR" err
+    Right extraOld -> do
+      acquired <- tryAcquireVsLock appGroup resolvedLockedBy
+      if not acquired
+        then throwM (Conflict ("VS is already locked for app group " <> appGroup))
+        else do
+          tid <- liftIO (UUID.toText <$> UUID.nextRandom)
+          let durationSecs = fromIntegral (fromMaybe 15 lockDurationMinutes) * 60
+              lockExpiry = addUTCTime durationSecs now
+              row = mkVsEditRow (cloudProvider cfg) tid appGroup resolvedService resolvedEnv resolvedVsName (Just resolvedLockedBy) "LOCKED" now
+              rowWithExpiry = row {S.rtEndTime = Just lockExpiry}
+          insertReleaseTrackerRow rowWithExpiry
+          capturedOld <- case oldVsData of
+            Just d -> pure (Just d)
+            Nothing -> case mProdCfg of
+              Just pCfg | not (T.null resolvedVsName) -> do
+                let ns = getProductNamespace pCfg
+                result <- liftIO $ getVirtualServiceJson cfg ns resolvedVsName
+                case result of
+                  Right vsText -> pure (Just vsText)
+                  Left _ -> pure Nothing
+              _ -> pure Nothing
+          case capturedOld of
+            Just d -> insertReleaseEvent tid "SNAPSHOT" "VS_OLD" (String d)
+            Nothing -> pure ()
+          mapM_ (\(n, d) -> insertReleaseEvent tid "SNAPSHOT" (extraOldLabel n) (String d)) extraOld
+          notifyVsEditLocked tid appGroup (fromMaybe "" service) (fromMaybe "admin" lockedBy)
+          pure $ APIResponse "SUCCESS" ("VS locked. Tracker ID: " <> tid)
 
 -- | Ownership-checked unlock. releaseVsLockIfOwner guards the clear in a
 -- single UPDATE (no TOCTOU between check and release). If the current
@@ -544,16 +655,32 @@ revertVsEditTrackerH ap tid = do
                               String s' -> s'
                               _ -> ""
                             Nothing -> ""
+                      let extraEdits =
+                            [ (n, newS, latestSnapshot (extraOldLabel n) events)
+                              | n <- drop 1 (getProductVsNames pCfg),
+                                Just newS <- [latestSnapshot (extraNewLabel n) events]
+                            ]
+                          missingExtraOld = [n | (n, _, Nothing) <- extraEdits]
+                          checkExtras [] = pure (Right False)
+                          checkExtras ((n, newS, _) : rest) = do
+                            r <- getVirtualServiceJson cfg ns n
+                            case r of
+                              Left _ -> pure (Left ("Failed to fetch live VS " <> n <> " from k8s — cannot verify safety of revert."))
+                              Right liveTxt ->
+                                let differs = case (parseVsDoc liveTxt, parseVsDoc newS) of
+                                      (Just l, Just sn) -> l /= sn
+                                      _ -> True
+                                 in if differs then pure (Right True) else checkExtras rest
                       liveVsResult <- liftIO $ getVirtualServiceJson cfg ns vsN
-                      case liveVsResult of
-                        Left _ -> pure $ APIResponse "ERROR" "Failed to fetch live VS from k8s — cannot verify safety of revert."
-                        Right liveVsText -> do
-                          let cleanSpec t = case eitherDecode (LBS.pack (T.unpack t)) of
-                                Right v -> Just (stripK8sNoiseValue v)
-                                Left _ -> Nothing
+                      extraCheck <- if null missingExtraOld then liftIO (checkExtras extraEdits) else pure (Left ("No VS_OLD snapshot for: " <> T.intercalate ", " missingExtraOld <> " — cannot revert."))
+                      case (liveVsResult, extraCheck) of
+                        (Left _, _) -> pure $ APIResponse "ERROR" "Failed to fetch live VS from k8s — cannot verify safety of revert."
+                        (_, Left extraErr) -> pure $ APIResponse "ERROR" extraErr
+                        (Right liveVsText, Right extraModified) -> do
+                          let cleanSpec = parseVsDoc
                               liveClean = cleanSpec liveVsText
                               snapshotClean = cleanSpec newVsContent
-                              vsModified = case (liveClean, snapshotClean) of
+                              vsModified = extraModified || case (liveClean, snapshotClean) of
                                 (Just l, Just s) -> l /= s
                                 _ -> not (T.null newVsContent)
                           if vsModified
@@ -580,7 +707,12 @@ revertVsEditTrackerH ap tid = do
                                   insertReleaseTrackerRow revertRow
                                   insertReleaseEvent newTid "BUSINESS" "REVERT_TRACKER_CREATED" (String ("Revert of " <> tid))
                                   insertReleaseEvent newTid "SNAPSHOT" "VS_NEW" (String oldVsContent)
-                                  applyResult <- liftIO $ applyVsToK8s cfg (T.unpack ns) oldVsContent
+                                  let revertExtras = [(n, old, newS) | (n, newS, Just old) <- extraEdits]
+                                  mapM_ (\(n, old, _) -> insertReleaseEvent newTid "SNAPSHOT" (extraNewLabel n) (String old)) revertExtras
+                                  let revertTargets =
+                                        VsTarget vsN oldVsContent (if T.null newVsContent then Nothing else Just newVsContent)
+                                          : [VsTarget n old (Just newS) | (n, old, newS) <- revertExtras]
+                                  applyResult <- liftIO $ applyVsTargets cfg (T.unpack ns) revertTargets
                                   case applyResult of
                                     Left err -> do
                                       _ <- releaseVsLockIfOwner (S.rtAppGroup orig) (S.rtCreatedBy orig <> "-revert")
@@ -620,11 +752,37 @@ fetchCurrentVsH _ap mProduct _mService = do
                   Left _ -> pure $ toJSON vsText
     _ -> pure $ toJSON $ ErrorResponse "product query param required" Nothing
 
+-- | Fetch every VS configured for the product (primary first, then extras) as
+-- YAML, for the multi-VS editor.
+fetchCurrentVsAllH :: AuthedPerson -> Maybe Text -> Flow Value
+fetchCurrentVsAllH _ap mProduct = do
+  cfg <- getConfig
+  case mProduct of
+    Just prod -> do
+      mProdCfg <- findProductByNameAndCluster prod ""
+      case mProdCfg of
+        Nothing -> pure $ toJSON $ ErrorResponse ("No deployment_config found for " <> prod) (Just "Configure product first")
+        Just pCfg -> do
+          let names = getProductVsNames pCfg
+          if null names
+            then pure $ toJSON $ ErrorResponse ("No vsName configured for product " <> prod) (Just "Set vsName in product config")
+            else do
+              result <- liftIO $ fetchVsYamls cfg (getProductNamespace pCfg) names
+              case result of
+                Left err -> pure $ toJSON $ ErrorResponse err (Just "Failed to fetch VirtualService")
+                Right pairs ->
+                  pure $ toJSON [object ["name" .= n, "content" .= d, "primary" .= (i == (0 :: Int))] | (i, (n, d)) <- zip [0 ..] pairs]
+    _ -> pure $ toJSON $ ErrorResponse "product query param required" Nothing
+
 -- | Apply VS data to K8s via kubectl replace.
 applyVsToK8s :: Config -> String -> Text -> IO (Either Text ())
-applyVsToK8s cfg ns content = do
-  let cmd = unwords ["echo", shellQuote content, "|", kubectlBin cfg, "-n", ns, "replace -f -"]
-  logInfoG $ "[VS-APPLY] Running: kubectl -n " <> T.pack ns <> " replace -f -"
+applyVsToK8s = applyVsToK8sWith False
+
+applyVsToK8sWith :: Bool -> Config -> String -> Text -> IO (Either Text ())
+applyVsToK8sWith dryRun cfg ns content = do
+  let replaceArgs = if dryRun then "replace --dry-run=server -f -" else "replace -f -"
+      cmd = unwords ["echo", shellQuote content, "|", kubectlBin cfg, "-n", ns, replaceArgs]
+  logInfoG $ "[VS-APPLY] Running: kubectl -n " <> T.pack ns <> " " <> T.pack replaceArgs
   result <- runCmd cmd
   case result of
     Right _ -> pure (Right ())

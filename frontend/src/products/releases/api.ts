@@ -1527,6 +1527,20 @@ export async function fetchCurrentVS(appGroup: string, service: string): Promise
     return typeof data === 'string' ? data : JSON.stringify(data, null, 2);
 }
 
+export interface CurrentVSDoc {
+    name: string;
+    content: string;
+    primary: boolean;
+}
+
+export async function fetchCurrentVSAll(appGroup: string): Promise<CurrentVSDoc[]> {
+    const { data } = await apiClient.get('/vs-edit-tracker/current-vs-all', { params: { product: appGroup } });
+    if (!Array.isArray(data)) {
+        throw new Error(data?.error || data?.message || 'Failed to fetch VirtualServices');
+    }
+    return data;
+}
+
 export async function lockAndEditVS(payload: { appGroup: string; service: string; env: string; vsName: string; lockedBy: string; oldVsData?: string }): Promise<any> {
     const { data } = await apiClient.post('/vs-edit-tracker/lock', { ...payload, product: payload.appGroup });
     return data;
@@ -1537,8 +1551,12 @@ export async function applyVSEdit(id: string, newVsData: string): Promise<any> {
     return data;
 }
 
-export async function saveVSEdit(id: string, newVsData: string): Promise<any> {
-    const { data } = await apiClient.put(`/vs-edit-tracker/${encodeURIComponent(id)}`, { status: 'CREATED', newVsData });
+export async function saveVSEdit(id: string, newVsData: string, extraVsData?: { name: string; content: string }[]): Promise<any> {
+    const { data } = await apiClient.put(`/vs-edit-tracker/${encodeURIComponent(id)}`, {
+        status: 'CREATED',
+        newVsData,
+        ...(extraVsData && extraVsData.length > 0 ? { extraVsData } : {}),
+    });
     return data;
 }
 

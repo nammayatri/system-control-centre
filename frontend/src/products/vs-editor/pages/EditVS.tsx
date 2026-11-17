@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import Editor from '@monaco-editor/react';
-import { fetchProductConfigs, fetchServices, fetchCurrentVS, lockAndEditVS, saveVSEdit, unlockVSEdit } from '../../releases/api';
+import { fetchProductConfigs, fetchServices, fetchCurrentVSAll, lockAndEditVS, saveVSEdit, unlockVSEdit } from '../../releases/api';
 import type { ProductConfig } from '../../releases/api';
 import { Button } from '../../../shared/ui/button';
 import { PermissionGate } from '../../../core/auth/PermissionGate';
@@ -20,7 +20,9 @@ const EditVS: React.FC = () => {
   const [appGroup, setAppGroup] = useState('');
   const [service, setService] = useState('');
   const [env, setEnv] = useState('UAT');
-  const [vsData, setVsData] = useState('');
+  const [vsDocs, setVsDocs] = useState<Record<string, string>>({});
+  const [activeVs, setActiveVs] = useState('');
+  const [baselineDocs, setBaselineDocs] = useState<Record<string, string>>({});
   const [trackerId, setTrackerId] = useState<string | null>(null);
   const [isLocked, setIsLocked] = useState(false);
 
@@ -42,20 +44,31 @@ const EditVS: React.FC = () => {
     staleTime: 120000,
   });
 
-  const { data: currentVS, isLoading: loadingVS, refetch: refetchVS } = useQuery({
-    queryKey: ['current-vs', appGroup, service],
-    queryFn: () => fetchCurrentVS(appGroup, service),
+  const { data: currentVSDocs, isLoading: loadingVS, error: vsLoadError, refetch: refetchVS } = useQuery({
+    queryKey: ['current-vs-all', appGroup, service],
+    queryFn: () => fetchCurrentVSAll(appGroup),
     enabled: !!appGroup && !!service,
   });
 
+  const vsNames = (currentVSDocs ?? []).map(d => d.name);
+  const primaryName = (currentVSDocs ?? []).find(d => d.primary)?.name ?? vsNames[0] ?? '';
+  const liveDocs: Record<string, string> = Object.fromEntries((currentVSDocs ?? []).map(d => [d.name, d.content]));
+  const originalDocs = isLocked ? baselineDocs : liveDocs;
+  const currentName = vsNames.includes(activeVs) ? activeVs : primaryName;
+  const vsData = vsDocs[currentName] ?? '';
+
   useEffect(() => {
-    if (currentVS) setVsData(currentVS);
-  }, [currentVS]);
+    if (currentVSDocs && !isLocked) {
+      setVsDocs(Object.fromEntries(currentVSDocs.map(d => [d.name, d.content])));
+      setActiveVs(currentVSDocs.find(d => d.primary)?.name ?? currentVSDocs[0]?.name ?? '');
+    }
+  }, [currentVSDocs, isLocked]);
 
   const lockMut = useMutation({
-    mutationFn: () => lockAndEditVS({ appGroup, service, env, vsName: '', lockedBy: lockerIdentity, oldVsData: vsData }),
+    mutationFn: () => lockAndEditVS({ appGroup, service, env, vsName: '', lockedBy: lockerIdentity, oldVsData: vsDocs[primaryName] ?? '' }),
     onSuccess: (data) => {
       toast.success('VS locked for editing');
+      setBaselineDocs({ ...vsDocs });
       const resolvedId = data.message?.includes('Tracker ID:')
         ? data.message.split('Tracker ID: ')[1]?.trim()
         : data.id;
@@ -71,7 +84,12 @@ const EditVS: React.FC = () => {
   });
 
   const saveMut = useMutation({
-    mutationFn: () => saveVSEdit(trackerId!, vsData),
+    mutationFn: () => {
+      const extras = vsNames
+        .filter(n => n !== primaryName && (vsDocs[n] ?? '') !== (originalDocs[n] ?? ''))
+        .map(n => ({ name: n, content: vsDocs[n] ?? '' }));
+      return saveVSEdit(trackerId!, vsDocs[primaryName] ?? '', extras);
+    },
     onSuccess: () => {
       toast.success('VS changes saved');
       queryClient.invalidateQueries({ queryKey: ['vs-edits'] });
@@ -128,14 +146,14 @@ const EditVS: React.FC = () => {
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4 sm:gap-6">
           <div>
             <label className="block text-[11px] font-medium text-zinc-600 uppercase tracking-wider mb-1.5">App Group *</label>
-            <select value={appGroup} onChange={e => { setAppGroup(e.target.value); setService(''); setVsData(''); setIsLocked(false); setTrackerId(null); }} disabled={isLocked} className={cn(inputClass, 'cursor-pointer', isLocked && 'bg-zinc-50 cursor-not-allowed')}>
+            <select value={appGroup} onChange={e => { setAppGroup(e.target.value); setService(''); setVsDocs({}); setActiveVs(''); setIsLocked(false); setTrackerId(null); }} disabled={isLocked} className={cn(inputClass, 'cursor-pointer', isLocked && 'bg-zinc-50 cursor-not-allowed')}>
               <option value="">Select Product</option>
               {products.map(p => <option key={p} value={p}>{p}</option>)}
             </select>
           </div>
           <div>
             <label className="block text-[11px] font-medium text-zinc-600 uppercase tracking-wider mb-1.5">Service *</label>
-            <select value={service} onChange={e => { setService(e.target.value); setVsData(''); setIsLocked(false); setTrackerId(null); }} disabled={!appGroup || services.length === 0 || isLocked}
+            <select value={service} onChange={e => { setService(e.target.value); setVsDocs({}); setActiveVs(''); setIsLocked(false); setTrackerId(null); }} disabled={!appGroup || services.length === 0 || isLocked}
               className={cn(inputClass, 'cursor-pointer', (!appGroup || services.length === 0 || isLocked) && 'bg-zinc-50 cursor-not-allowed')}>
               <option value="">Select Service</option>
               {services.map((s: string) => <option key={s} value={s}>{s}</option>)}
@@ -155,6 +173,7 @@ const EditVS: React.FC = () => {
                 </span>
               )}
               {loadingVS && <span className="text-xs text-zinc-400">Loading...</span>}
+              {vsLoadError && <span className="text-xs text-red-600">{(vsLoadError as Error).message}</span>}
             </div>
             <div className="flex items-center gap-2 flex-wrap">
               {!isLocked && (
@@ -176,13 +195,27 @@ const EditVS: React.FC = () => {
               )}
             </div>
           </div>
+          {vsNames.length > 1 && (
+            <div className="flex border-t border-zinc-100 px-2 sm:px-4 overflow-x-auto">
+              {vsNames.map(n => {
+                const changed = (vsDocs[n] ?? '') !== (originalDocs[n] ?? '');
+                return (
+                  <button key={n} onClick={() => setActiveVs(n)}
+                    className={cn('py-2.5 px-3 text-xs font-medium border-b-2 whitespace-nowrap cursor-pointer transition-colors duration-150', currentName === n ? 'border-zinc-900 text-zinc-900' : 'border-transparent text-zinc-400 hover:text-zinc-600')}>
+                    {n}{n === primaryName ? ' (primary)' : ''}{changed ? ' •' : ''}
+                  </button>
+                );
+              })}
+            </div>
+          )}
           <div className="border-t border-zinc-100">
             <Editor
               height="500px"
               defaultLanguage="yaml"
               theme="light"
               value={vsData}
-              onChange={(val) => { if (isLocked) setVsData(val || ''); }}
+              path={currentName || undefined}
+              onChange={(val) => { if (isLocked && currentName) setVsDocs(prev => ({ ...prev, [currentName]: val || '' })); }}
               options={{
                 minimap: { enabled: false },
                 fontSize: 13,

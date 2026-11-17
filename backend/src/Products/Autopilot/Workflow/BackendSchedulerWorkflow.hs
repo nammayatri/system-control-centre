@@ -38,7 +38,7 @@ import Products.Autopilot.K8s.Deployment
     deploymentExists,
     getDeploymentPodSelector,
     getDeploymentReplicaStatus,
-    getRunningSchedulerVersion,
+    getRunningSchedulerDeployment,
   )
 import Products.Autopilot.K8s.Execute (K8sError (..), K8sResult (..), executeWithRetry, runCmd, shellQuote)
 import Products.Autopilot.K8s.HPA (buildCloneHpaCommand, buildCreateHpaFromTemplateCommand, buildDeleteHpaCommand, getHpaMinMax, hpaExists)
@@ -64,7 +64,7 @@ import Products.Autopilot.Types.Target
     TargetState (..),
     emptyK8sState,
   )
-import Products.Autopilot.Types.Target.Kubernetes (K8sReleaseContext (..))
+import Products.Autopilot.Types.Target.Kubernetes (K8sReleaseContext (..), oldDeploymentNameOf)
 import Products.Autopilot.Types.Workflow (ReleaseWFStatus (..))
 import Products.Autopilot.Workflow.Helpers
   ( captureDeploymentSnapshot,
@@ -198,7 +198,7 @@ validatePreconditions = do
         )
 
   -- Verify old deployment exists (for non-new schedulers)
-  let oldDepName = serviceName ctx <> "-" <> oldVersion ctx
+  let oldDepName = oldDeploymentNameOf ctx
   oldExists <- liftIO $ deploymentExists cfg (namespace ctx) oldDepName
   when (not oldExists && not (T.null (oldVersion ctx)) && oldVersion ctx /= "new") $
     logWarningS $
@@ -224,7 +224,7 @@ prepareK8sResources = do
     _ <- liftIO $ runCmd (buildDeleteHpaCommand cfg (namespace ctx) revertHpaName)
     pure ()
 
-  let oldDepName = serviceName ctx <> "-" <> oldVersion ctx
+  let oldDepName = oldDeploymentNameOf ctx
       knownOldVersion =
         not (T.null (oldVersion ctx))
           && oldVersion ctx /= "unknown"
@@ -288,10 +288,9 @@ prepareK8sResources = do
           if oldDepExists
             then pure ctx
             else do
-              discovered <- liftIO $ getRunningSchedulerVersion cfg (namespace ctx) (serviceName ctx)
+              discovered <- liftIO $ getRunningSchedulerDeployment cfg (namespace ctx) (serviceName ctx)
               case discovered of
-                Right (Just liveVer) -> do
-                  let liveDepName = serviceName ctx <> "-" <> liveVer
+                Right (Just (liveDepName, liveVer)) -> do
                   liveExists <- liftIO $ deploymentExists cfg (namespace ctx) liveDepName
                   if liveExists
                     then do
@@ -301,7 +300,7 @@ prepareK8sResources = do
                           <> "' not found; using live version '"
                           <> liveVer
                           <> "'"
-                      pure ctx {oldVersion = liveVer}
+                      pure ctx {oldVersion = liveVer, oldDeploymentName = if liveDepName == serviceName ctx <> "-" <> liveVer then Nothing else Just liveDepName}
                     else
                       liftIO $
                         throwIO $
@@ -390,7 +389,7 @@ prepareK8sResources = do
   -- group is in scaling_with_hpa_enabled -- most schedulers stay HPA-less
   -- by default.
   let newHpaName = serviceName ctx <> "-" <> newVersion ctx <> "-hpa"
-      oldHpaName = serviceName ctx <> "-" <> oldVersion resolvedSrcCtx <> "-hpa"
+      oldHpaName = oldDeploymentNameOf resolvedSrcCtx <> "-hpa"
   newHpaFound <- liftIO $ hpaExists cfg (namespace ctx) newHpaName
   if newHpaFound
     then do
@@ -552,7 +551,7 @@ podCountRollout = do
   -- Step 2: New is fully ramped — NOW scale OLD to 0.
   -- Bug fix: previously this happened BEFORE step 1, leaving a window with
   -- zero active workers. Schedulers/queue workers can't tolerate that gap.
-  let oldDepName = serviceName ctx <> "-" <> oldVersion ctx
+  let oldDepName = oldDeploymentNameOf ctx
   logInfoS $ "  New deployment fully ramped, scaling down old deployment: " <> oldDepName
   _ <- runK8sIO $ runCmd (buildScaleNamedDeploymentCommand cfg (namespace ctx) oldDepName 0)
   updateK8sField (\k8s -> k8s {oldDeploymentScaledDown = True})
@@ -890,7 +889,7 @@ cleanupOldVersion = do
   logInfoS $ "Cleaning up old version for scheduler " <> appGroup rt
 
   updateK8sStatus BSScaleDownOld
-  let oldDepName = serviceName ctx <> "-" <> oldVersion ctx
+  let oldDepName = oldDeploymentNameOf ctx
       oldHpaName = oldDepName <> "-hpa"
 
   -- Clean up old deployment's HPA if it exists

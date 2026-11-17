@@ -17,6 +17,7 @@ module Products.Autopilot.K8s.Deployment (
     getDeploymentEnvs,
     getRunningVersionFromVS,
     getRunningSchedulerVersion,
+    getRunningSchedulerDeployment,
     buildCloneDeploymentWithEnvsCommand,
     buildPatchDeploymentEnvsCommand,
     serviceExists,
@@ -37,7 +38,7 @@ import Data.Text qualified as T
 import Data.Text.Encoding (encodeUtf8)
 import Products.Autopilot.K8s.Execute
 import Products.Autopilot.Types.Release (RolloutStep (..))
-import Products.Autopilot.Types.Target.Kubernetes (K8sReleaseContext (..))
+import Products.Autopilot.Types.Target.Kubernetes (K8sReleaseContext (..), oldDeploymentNameOf)
 
 buildSetImageCommand :: Config -> K8sReleaseContext -> String
 buildSetImageCommand cfg ctx =
@@ -60,7 +61,7 @@ buildSetImageCommand cfg ctx =
 -- -- normally the first rollout stage's own podCount.
 buildCloneDeploymentCommand :: Config -> K8sReleaseContext -> Int -> String
 buildCloneDeploymentCommand cfg ctx initialReplicas =
-    let sourceDep = T.unpack (serviceName ctx) <> "-" <> T.unpack (oldVersion ctx)
+    let sourceDep = T.unpack (oldDeploymentNameOf ctx)
         targetDep = T.unpack (deploymentName ctx)
         explicitDockerImage = maybe "" T.unpack (dockerImage ctx)
         patchFilter = ".metadata.name = $targetDep | .metadata.labels.version = $newTag | .spec.replicas = $replicas | .spec.selector.matchLabels.version = $newTag | .spec.template.metadata.labels.version = $newTag | (.spec.template.spec.containers[0].image) |= (if ($dockerImage != \"\") then (if (($dockerImage | test(\"/\")) or ($dockerImage | test(\":\"))) then $dockerImage elif test(\":\") then sub(\":[^:]+$\"; \":\" + $dockerImage) elif test(\"-\" + $oldTag + \"$\") then sub(\"-\" + $oldTag + \"$\"; \"-\" + $dockerImage) elif test(\"-\") then sub(\"-(?<last>[^-:]+)$\"; \"-\" + $dockerImage) else . end) elif test(\"-\" + $oldTag + \"$\") then sub(\"-\" + $oldTag + \"$\"; \"-\" + $newTag) elif test(\":\" + $oldTag + \"$\") then sub(\":\" + $oldTag + \"$\"; \":\" + $newTag) elif test(\":\") then sub(\":[^:]+$\"; \":\" + $newTag) elif test(\"-\") then sub(\"-(?<last>[^-:]+)$\"; \"-\" + $newTag) else . end) | del(.metadata.uid,.metadata.resourceVersion,.metadata.generation,.metadata.creationTimestamp,.metadata.managedFields,.metadata.annotations.\"deployment.kubernetes.io/revision\",.status)"
@@ -70,7 +71,7 @@ buildCloneDeploymentCommand cfg ctx initialReplicas =
 -- 'buildCloneDeploymentCommand' for why @initialReplicas@ is baked into the patch.
 buildCloneDeploymentWithEnvsCommand :: Config -> K8sReleaseContext -> Text -> Int -> String
 buildCloneDeploymentWithEnvsCommand cfg ctx envsJson initialReplicas =
-    let sourceDep = T.unpack (serviceName ctx) <> "-" <> T.unpack (oldVersion ctx)
+    let sourceDep = T.unpack (oldDeploymentNameOf ctx)
         targetDep = T.unpack (deploymentName ctx)
         explicitDockerImage = maybe "" T.unpack (dockerImage ctx)
         patchFilter = ".metadata.name = $targetDep | .metadata.labels.version = $newTag | .spec.replicas = $replicas | .spec.selector.matchLabels.version = $newTag | .spec.template.metadata.labels.version = $newTag | (.spec.template.spec.containers[0].image) |= (if ($dockerImage != \"\") then (if (($dockerImage | test(\"/\")) or ($dockerImage | test(\":\"))) then $dockerImage elif test(\":\") then sub(\":[^:]+$\"; \":\" + $dockerImage) elif test(\"-\" + $oldTag + \"$\") then sub(\"-\" + $oldTag + \"$\"; \"-\" + $dockerImage) elif test(\"-\") then sub(\"-(?<last>[^-:]+)$\"; \"-\" + $dockerImage) else . end) elif test(\"-\" + $oldTag + \"$\") then sub(\"-\" + $oldTag + \"$\"; \"-\" + $newTag) elif test(\":\" + $oldTag + \"$\") then sub(\":\" + $oldTag + \"$\"; \":\" + $newTag) elif test(\":\") then sub(\":[^:]+$\"; \":\" + $newTag) elif test(\"-\") then sub(\"-(?<last>[^-:]+)$\"; \"-\" + $newTag) else . end) | .spec.template.spec.containers[0].env = ($envs | fromjson) | del(.metadata.uid,.metadata.resourceVersion,.metadata.generation,.metadata.creationTimestamp,.metadata.managedFields,.metadata.annotations.\"deployment.kubernetes.io/revision\",.status)"
@@ -163,8 +164,21 @@ getDeploymentReplicaStatus cfg ns depName = do
   where
     parseInt s = case reads s of ((n, _) : _) -> n; _ -> 0
 
+-- | Version of the running scheduler deployment (most ready replicas).
 getRunningSchedulerVersion :: Config -> Text -> Text -> IO (Either Text (Maybe Text))
-getRunningSchedulerVersion cfg ns svcHost = do
+getRunningSchedulerVersion cfg ns svcHost = fmap (fmap snd) <$> getRunningSchedulerDeployment cfg ns svcHost
+
+{- | The running scheduler deployment as @(deploymentName, version)@ -- the one
+with the most ready replicas among deployments labelled @app=<svcHost>@.
+
+Autopilot-created deployments are named @<svcHost>-<version>@. Hand-created
+ones may be named exactly @<svcHost>@ (no suffix); for those the version is
+read from the @version@ label (deployment, then pod template), falling back to
+the image tag's last @-@ segment. The real name is returned so callers don't
+have to assume the convention.
+-}
+getRunningSchedulerDeployment :: Config -> Text -> Text -> IO (Either Text (Maybe (Text, Text)))
+getRunningSchedulerDeployment cfg ns svcHost = do
     res <-
         runCmd
             ( unwords
@@ -173,7 +187,7 @@ getRunningSchedulerVersion cfg ns svcHost = do
                 , shellQuote ns
                 , "get deployments"
                 , "-l"
-                , "app=" ++ T.unpack svcHost
+                , shellQuote ("app=" <> svcHost)
                 , "-o"
                 , "json"
                 ]
@@ -187,42 +201,65 @@ getRunningSchedulerVersion cfg ns svcHost = do
   where
     pickRunning (Object root) = case KM.lookup (K.fromText "items") root of
         Just (Array items) ->
-            case [(ver, ready) | item <- foldr (:) [] items, Just (ver, ready) <- [extract item], ready > 0] of
+            case [(dep, ver, ready) | item <- foldr (:) [] items, Just (dep, ver, ready) <- [extract item], ready > 0] of
                 [] -> Nothing
-                xs -> Just (fst (foldr1 maxByReady xs))
+                xs -> let (d, v, _) = foldr1 maxByReady xs in Just (d, v)
         _ -> Nothing
     pickRunning _ = Nothing
     extract (Object item) = do
         meta <- lookupObj "metadata" item
         name <- lookupTxt "name" meta
-        -- Scheduler deployments are named "<svcHost>-<version>".
-        -- The 'version' metadata label is absent on deployments created by
-        -- ny-autopilot, so extract the version from the deployment name directly.
-        ver <- T.stripPrefix (svcHost <> "-") name
+        ver <- case T.stripPrefix (svcHost <> "-") name of
+            Just v | not (T.null v) -> Just v
+            _
+                | name == svcHost -> versionFromLabelsOrImage item meta
+                | otherwise -> Nothing
         let ready = case lookupObj "status" item >>= KM.lookup (K.fromText "readyReplicas") of
                 Just (Number n) -> round n :: Int
                 _ -> 0
-        Just (ver, ready)
+        Just (name, ver, ready)
     extract _ = Nothing
+    versionFromLabelsOrImage item meta =
+        firstJust
+            [ lookupObj "labels" meta >>= lookupTxt "version"
+            , lookupObj "spec" item >>= lookupObj "template" >>= lookupObj "metadata" >>= lookupObj "labels" >>= lookupTxt "version"
+            , imageTag item
+            ]
+    imageTag item = do
+        spec <- lookupObj "spec" item
+        tmpl <- lookupObj "template" spec
+        podSpec <- lookupObj "spec" tmpl
+        case KM.lookup (K.fromText "containers") podSpec of
+            Just (Array cs) -> case foldr (:) [] cs of
+                (Object c : _) -> do
+                    img <- lookupTxt "image" c
+                    let tag = snd (T.breakOnEnd ":" img)
+                        lastSeg = snd (T.breakOnEnd "-" tag)
+                    if T.null lastSeg then Nothing else Just lastSeg
+                _ -> Nothing
+            _ -> Nothing
+    firstJust xs = case [x | Just x <- xs, not (T.null x)] of
+        (x : _) -> Just x
+        [] -> Nothing
     lookupObj key obj = case KM.lookup (K.fromText key) obj of Just (Object o) -> Just o; _ -> Nothing
     lookupTxt key obj = case KM.lookup (K.fromText key) obj of Just (String t) -> Just t; _ -> Nothing
-    maxByReady a b = if snd a < snd b then b else a
+    maxByReady a@(_, _, ra) b@(_, _, rb) = if ra < rb then b else a
 
 getDeploymentEnvs :: Config -> Text -> Text -> Text -> Bool -> IO (Either K8sError Value)
 getDeploymentEnvs cfg ns vsName svcHost isScheduler = do
-    versionRes <-
+    depRes <-
         if isScheduler
             then do
-                r <- getRunningSchedulerVersion cfg ns svcHost
+                r <- getRunningSchedulerDeployment cfg ns svcHost
                 pure $ case r of
                     Left err -> Left (K8sError err)
                     Right Nothing -> Left (K8sError ("No running scheduler deployment found for service " <> svcHost))
-                    Right (Just v) -> Right v
-            else getRunningVersionFromVS cfg ns vsName svcHost
-    case versionRes of
+                    Right (Just (dep, _)) -> Right dep
+            else fmap (\v -> svcHost <> "-" <> v) <$> getRunningVersionFromVS cfg ns vsName svcHost
+    case depRes of
         Left err -> pure (Left err)
-        Right runningVersion -> do
-            let fullDepName = T.unpack svcHost <> "-" <> T.unpack runningVersion
+        Right depName -> do
+            let fullDepName = T.unpack depName
             res <- runCmd (unwords [kubectlBin cfg, "-n", shellQuote ns, "get deployment", shellQuote (T.pack fullDepName), "-o jsonpath='{.spec.template.spec.containers[0].env}'"])
             pure $ case res of
                 Left err -> Left err

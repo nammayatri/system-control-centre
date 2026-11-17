@@ -28,7 +28,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding (encodeUtf8)
 import Products.Autopilot.Actions.Release (normalizeProductType)
-import Products.Autopilot.K8s.Deployment (getDeploymentEnvs, getDeploymentReplicaStatus)
+import Products.Autopilot.K8s.Deployment (getDeploymentEnvs, getDeploymentReplicaStatus, getRunningSchedulerDeployment)
 import Products.Autopilot.K8s.Execute (K8sError (..), K8sResult (..), runCmd)
 import Products.Autopilot.K8s.Kubectl (runningVersionFromK8s)
 import Products.Autopilot.Queries.ProductService
@@ -116,10 +116,18 @@ resolveRolloutPodEstimateH _ap req = do
                 -- product_type, not the per-service serviceType row.
                 isScheduler = either (const False) (== "BackendScheduler") (normalizeProductType (fromMaybe "" (S.dcAppGroupType pCfg)))
             mOldVersion <- liftIO $ runningVersionFromK8s cfg ns vsName' svcHost isScheduler
+            -- Scheduler deployments may not follow "<svcHost>-<version>"; use the real name.
+            schedDep <-
+                if isScheduler
+                    then either (const Nothing) id <$> liftIO (getRunningSchedulerDeployment cfg ns svcHost)
+                    else pure Nothing
             oldReadyPods <- case mOldVersion of
                 Nothing -> pure 0
                 Just ov -> do
-                    statusResult <- liftIO $ getDeploymentReplicaStatus cfg ns (svcHost <> "-" <> ov)
+                    let depName = case schedDep of
+                            Just (d, v) | v == ov -> d
+                            _ -> svcHost <> "-" <> ov
+                    statusResult <- liftIO $ getDeploymentReplicaStatus cfg ns depName
                     pure $ case statusResult of
                         Right (ready, _, _) -> ready
                         Left _ -> 0

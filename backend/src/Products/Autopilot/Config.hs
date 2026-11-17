@@ -7,6 +7,12 @@ import Shared.Config.Types
 autopilotConfigs :: [ConfigEntry]
 autopilotConfigs =
     [ ConfigEntry
+        "internal_vs_by_service"
+        (JsonConfig "{}")
+        DeploymentGroup
+        "Extra mesh VirtualService to roll with each service release (JSON: service host -> VS name)"
+        (Just "autopilot")
+    , ConfigEntry
         "k8s_enabled"
         (BoolConfig True)
         DeploymentGroup

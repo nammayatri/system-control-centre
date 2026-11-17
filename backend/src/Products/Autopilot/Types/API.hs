@@ -463,8 +463,22 @@ instance FromJSON CreateVsEditTrackerReq where
 instance ToJSON CreateVsEditTrackerReq where
     toJSON = genericToJSON defaultOptions{omitNothingFields = True}
 
+data NamedVsData = NamedVsData
+    { nvdName :: Text
+    , nvdContent :: Text
+    }
+    deriving (Show, Generic)
+
+instance FromJSON NamedVsData where
+    parseJSON = withObject "NamedVsData" $ \v ->
+        NamedVsData <$> v .: "name" <*> v .: "content"
+
+instance ToJSON NamedVsData where
+    toJSON (NamedVsData n c) = object ["name" .= n, "content" .= c]
+
 data UpdateVsEditTrackerReq = UpdateVsEditTrackerReq
     { newVsData :: Maybe Text
+    , extraVsData :: Maybe [NamedVsData]
     , status :: Maybe Text
     , approvedBy :: Maybe Text
     , info :: Maybe Text

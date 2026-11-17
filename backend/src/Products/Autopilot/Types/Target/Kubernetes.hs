@@ -7,6 +7,7 @@ module Products.Autopilot.Types.Target.Kubernetes (
     -- * Release Context
     K8sReleaseContext (..),
     defaultK8sReleaseContext,
+    oldDeploymentNameOf,
 
     -- * Product / Service Config (JSON target_config)
     K8sProductConfig (..),
@@ -24,6 +25,7 @@ module Products.Autopilot.Types.Target.Kubernetes (
 where
 
 import Data.Aeson (FromJSON, ToJSON, Value)
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Time.Clock (UTCTime)
 import GHC.Generics (Generic)
@@ -75,6 +77,11 @@ data K8sReleaseContext = K8sReleaseContext
     , internalVirtualServiceName :: Maybe Text
     , containerName :: Text
     , oldVersion :: Text
+    , oldDeploymentName :: Maybe Text
+    -- ^ Actual k8s name of the old (source) deployment when it does NOT follow
+    -- the @<serviceName>-<oldVersion>@ convention (e.g. a hand-created
+    -- scheduler deployment named exactly @<serviceName>@). 'Nothing' = use the
+    -- convention; see 'oldDeploymentNameOf'. Older rows decode as 'Nothing'.
     , newVersion :: Text
     , dockerImage :: Maybe Text
     , matches :: [MatchDetails]
@@ -110,6 +117,11 @@ instance ToJSON K8sReleaseContext
 
 instance FromJSON K8sReleaseContext
 
+-- | Name of the old (source) deployment: the explicit override if set, else
+-- the @<serviceName>-<oldVersion>@ convention.
+oldDeploymentNameOf :: K8sReleaseContext -> Text
+oldDeploymentNameOf ctx = fromMaybe (serviceName ctx <> "-" <> oldVersion ctx) (oldDeploymentName ctx)
+
 defaultK8sReleaseContext :: K8sReleaseContext
 defaultK8sReleaseContext =
     K8sReleaseContext
@@ -122,6 +134,7 @@ defaultK8sReleaseContext =
         , internalVirtualServiceName = Nothing
         , containerName = ""
         , oldVersion = ""
+        , oldDeploymentName = Nothing
         , newVersion = ""
         , dockerImage = Nothing
         , matches = []
