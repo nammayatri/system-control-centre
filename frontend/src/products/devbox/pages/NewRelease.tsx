@@ -280,7 +280,7 @@ function Summary(p: {
             {row('Control centre', p.ccBranch || '—')}
             {row('App', p.frontendBranch ? `${p.frontendBranch}${p.builds ? ` · ${p.builds}` : ' · no builds'}` : '—')}
             {row('Data', p.data)}
-            {row('URL', `https://service-discovery.devenv.movingtech.net/api/<dev-box>/8889/${p.workspace || '…'}`)}
+            {row('URL', `https://service-discovery.devenv.movingtech.net/api/<dev-box>/8888/${p.workspace || '…'}`)}
             {row('Auto-stop', `${stopOn} (3 days)`)}
           </dl>
           <p className="border-t border-zinc-100 pt-3 text-sm text-zinc-600 dark:border-zinc-800 dark:text-zinc-400">
