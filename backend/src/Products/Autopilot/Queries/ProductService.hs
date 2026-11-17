@@ -42,8 +42,13 @@ getProductCluster = fromMaybe "" . dcCluster
 getProductNamespace :: DeploymentConfig -> Text
 getProductNamespace = fromMaybe "" . dcNamespace
 
+getProductVsNames :: DeploymentConfig -> [Text]
+getProductVsNames = filter (not . Data.Text.null) . map Data.Text.strip . Data.Text.splitOn "," . fromMaybe "" . dcVsName
+
 getProductVsName :: DeploymentConfig -> Text
-getProductVsName = fromMaybe "" . dcVsName
+getProductVsName cfg = case getProductVsNames cfg of
+  (n : _) -> n
+  [] -> ""
 
 getProductSyncCluster :: DeploymentConfig -> Maybe Text
 getProductSyncCluster = dcSyncCluster

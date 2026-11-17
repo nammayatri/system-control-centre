@@ -46,7 +46,7 @@ import Products.Autopilot.Types
 import Products.Autopilot.Types qualified as NT
 import Products.Autopilot.Types.Storage.Schema (DeploymentConfig, ReleaseEvent, dcAppGroup, reCreatedAt, rePayload)
 import Products.Autopilot.Types.Target (TargetState (..))
-import Products.Autopilot.Types.Target.Kubernetes (K8sDeploymentState (..), K8sReleaseContext (..), PodsScaleDownStatus (..))
+import Products.Autopilot.Types.Target.Kubernetes (K8sDeploymentState (..), K8sReleaseContext (..), PodsScaleDownStatus (..), oldDeploymentNameOf)
 import Products.Autopilot.Types.Target.Kubernetes qualified as K8s
 import Products.Autopilot.Workflow.ConfigPilotWorkflow (abortConfigPilotRelease)
 import Products.Autopilot.Workflow.Factory (executeReleaseWorkflow)
@@ -779,7 +779,7 @@ restoreVsTrafficOnFailure cfg rt mts = do
                 else do
                     let newDepName = deploymentName ctx
                         ns = namespace ctx
-                        oldDepName = serviceName ctx <> "-" <> oldVer
+                        oldDepName = oldDeploymentNameOf ctx
 
                     -- Step 1: probe old vs. new's current replica counts.
                     oldStatus <- liftIO $ getDeploymentReplicaStatus cfg ns oldDepName
@@ -1362,9 +1362,8 @@ scaleDownOldDeployment cfg (rt, mts) = do
                     | NT.status freshRT `elem` [COMPLETED, ABORTED, USER_ABORTED] -> do
                         let ctx = context k8s
                             oldVer = K8s.oldVersion ctx
-                            svcName = serviceName ctx
                             ns = namespace ctx
-                            oldDepName = svcName <> "-" <> oldVer
+                            oldDepName = oldDeploymentNameOf ctx
                         -- CRITICAL: before draining the old version, check whether
                         -- it's currently the *new version* of an in-flight release on
                         -- the same service (e.g. a revert that's rolling traffic back

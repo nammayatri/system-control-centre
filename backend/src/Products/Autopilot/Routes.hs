@@ -125,6 +125,7 @@ type CoreAPI =
         :<|> "vs-edit-tracker" :> Protected 'AP_RELEASE_CREATE :> ReqBody '[JSON] CreateVsEditTrackerReq :> Post '[JSON] Value
         :<|> "vs-edit-tracker" :> Protected 'AP_RELEASE_VIEW :> "list" :> QueryParam "from" Text :> QueryParam "to" Text :> Get '[JSON] [VsEditTrackerResponse]
         :<|> "vs-edit-tracker" :> Protected 'AP_RELEASE_VIEW :> "current-vs" :> QueryParam "product" Text :> QueryParam "service" Text :> Get '[JSON] Value
+        :<|> "vs-edit-tracker" :> Protected 'AP_RELEASE_VIEW :> "current-vs-all" :> QueryParam "product" Text :> Get '[JSON] Value
         :<|> "vs-edit-tracker" :> Protected 'AP_RELEASE_CREATE :> "lock" :> ReqBody '[JSON] VsLockReq :> Post '[JSON] APIResponse
         :<|> "vs-edit-tracker" :> Protected 'AP_RELEASE_UPDATE :> "unlock" :> ReqBody '[JSON] VsUnlockReq :> Post '[JSON] APIResponse
         :<|> "vs-edit-tracker" :> Protected 'AP_FORCE_UNLOCK :> "force-unlock" :> ReqBody '[JSON] VsUnlockReq :> Post '[JSON] APIResponse
@@ -260,6 +261,7 @@ coreServer =
         :<|> VSEdit.createVsEditTrackerH
         :<|> VSEdit.listVsEditTrackersH
         :<|> VSEdit.fetchCurrentVsH
+        :<|> VSEdit.fetchCurrentVsAllH
         :<|> VSEdit.lockVsEditTrackerH
         :<|> VSEdit.unlockVsEditTrackerH
         :<|> VSEdit.forceUnlockVsEditTrackerH

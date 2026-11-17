@@ -32,7 +32,7 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Data.Vector as V
 import Products.Autopilot.Actions.Release (normalizeProductType)
-import Products.Autopilot.K8s.Deployment (getDeploymentEnvs, getRunningSchedulerVersion, getRunningVersionFromVS)
+import Products.Autopilot.K8s.Deployment (getDeploymentEnvs, getRunningSchedulerDeployment, getRunningVersionFromVS)
 import Products.Autopilot.K8s.Execute (K8sError (..), K8sResult (..), runCmd, shellQuote)
 import Products.Autopilot.Queries.ProductService
 import qualified Products.Autopilot.Types.Storage.Schema as S
@@ -161,12 +161,11 @@ readServiceRefs appGroup svcName = do
             ver <-
                 liftIO $
                     if isSched
-                        then either Left (maybe (Left "no running scheduler deployment") Right) <$> getRunningSchedulerVersion cfg ns svcHost
-                        else either (\(K8sError e) -> Left e) Right <$> getRunningVersionFromVS cfg ns vs svcHost
+                        then either Left (maybe (Left "no running scheduler deployment") (Right . fst)) <$> getRunningSchedulerDeployment cfg ns svcHost
+                        else fmap (\v -> svcHost <> "-" <> v) . either (\(K8sError e) -> Left e) Right <$> getRunningVersionFromVS cfg ns vs svcHost
             case ver of
                 Left e -> pure (Left ("cannot resolve the running deployment: " <> T.take 200 e))
-                Right v -> do
-                    let depName = svcHost <> "-" <> v
+                Right depName -> do
                     res <- liftIO (runCmd (unwords [kubectlBin cfg, "-n", shellQuote ns, "get deployment", shellQuote depName, "-o json"]))
                     pure $ case res of
                         Left (K8sError e) -> Left ("cannot read deployment " <> depName <> ": " <> T.take 200 e)

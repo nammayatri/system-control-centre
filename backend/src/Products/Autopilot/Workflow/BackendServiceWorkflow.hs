@@ -18,6 +18,7 @@ module Products.Autopilot.Workflow.BackendServiceWorkflow
     mkRolloutHistory,
     maxLoopIterations,
     maxLoopDurationSec,
+    extractInternalVsPrimarySubset,
   )
 where
 
@@ -223,7 +224,7 @@ extractInternalVsPrimarySubset vsJson host =
                             subsetVal = case KM.lookup (K.fromText "subset") d of
                               Just (String subsetTxt) -> Just subsetTxt
                               _ -> Nothing
-                         in if hostVal == host then subsetVal <|> acc else acc
+                         in if hostVal == host || T.takeWhile (/= '.') hostVal == T.takeWhile (/= '.') host then subsetVal <|> acc else acc
                       _ -> acc
                   pickBest _ acc = acc
                   tryRules [] = Nothing

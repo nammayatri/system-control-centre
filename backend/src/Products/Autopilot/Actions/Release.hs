@@ -92,7 +92,7 @@ import Products.Autopilot.ConfigReview (reviewBlocksApproval, runConfigReview)
 import Products.Autopilot.DiffLink (buildDiffLink)
 import Products.Autopilot.Discovery (listServicesFromVirtualService)
 import Products.Autopilot.EventLog (logAbortTriggered, logStatusUpdated)
-import Products.Autopilot.K8s.Deployment (buildPatchDeploymentEnvsCommand, deploymentExists, getPodsForVersions, getRunningSchedulerVersion)
+import Products.Autopilot.K8s.Deployment (buildPatchDeploymentEnvsCommand, deploymentExists, getPodsForVersions, getRunningSchedulerDeployment)
 import Products.Autopilot.K8s.Execute (K8sError (..), K8sResult (..), executeWithRetry, runCmd, shellQuote)
 import Products.Autopilot.K8s.Kubectl (getPrimarySubsetFromVirtualService)
 import Products.Autopilot.Mobile.Lifecycle.BuildKind (buildKind)
@@ -123,6 +123,7 @@ import Products.Autopilot.Types.Target.Kubernetes qualified as K8s
 import Products.Autopilot.Workflow.ConfigPilotWorkflow (configPilotStaggerInfo)
 import Products.Autopilot.Workflow.Helpers (captureDeploymentPreview, captureDeploymentSnapshot)
 import Shared.API.Response (APIResponse (..))
+import Shared.Queries.ServerConfig (getEnabledServerConfigValueForProduct)
 
 -- ============================================================================
 -- Shared helpers
@@ -742,6 +743,18 @@ createReleaseHBodyAfterStrategyCheck mXForwardedEmail mXPomeriumJwt K8sCreateRel
                                     then pure $ APIResponse "ERROR" ("Service " <> service <> " in app group " <> appGroup <> " is already being modified (service_state guard). Try again shortly.")
                                     else createReleaseHBodyAfterClaim mXForwardedEmail mXPomeriumJwt K8sCreateReleaseReq {..} pCfg sCfg
 
+lookupConfiguredInternalVs :: Text -> Text -> Flow (Maybe Text)
+lookupConfiguredInternalVs appGroup svcHost = do
+  raw <- getEnabledServerConfigValueForProduct "internal_vs_by_service" (Just appGroup)
+  pure $ do
+    txt <- raw
+    parsed <- A.decodeStrict' (encodeUtf8 txt)
+    case parsed of
+      Object o -> case KM.lookup (K.fromText svcHost) o of
+        Just (String t) | not (T.null (T.strip t)) -> Just (T.strip t)
+        _ -> Nothing
+      _ -> Nothing
+
 createReleaseHBodyAfterClaim ::
   Maybe Text ->
   Maybe Text ->
@@ -764,6 +777,15 @@ createReleaseHBodyAfterClaim mXForwardedEmail mXPomeriumJwt K8sCreateReleaseReq 
                   Just (String t) | not (T.null t) -> Just t
                   _ -> Nothing
           _ -> Nothing
+  configuredInternalVs <- lookupConfiguredInternalVs (S.dcAppGroup pCfg) targetSvcHost
+  let resolvedInternalVsName = metadataInternalVsName <|> configuredInternalVs
+  -- Schedulers: discover the live deployment once. Its real name is kept so a
+  -- hand-created deployment that doesn't follow "<svcHost>-<version>" (e.g.
+  -- named exactly "<svcHost>") can still be cloned / scaled / cleaned up.
+  discoveredScheduler <-
+    if trackerType == BackendScheduler && not (fromMaybe False newService)
+      then liftIO $ getRunningSchedulerDeployment cfg (getProductNamespace pCfg) targetSvcHost
+      else pure (Right Nothing)
   resolvedOldVersion <-
     if fromMaybe False newService
       then do
@@ -773,12 +795,11 @@ createReleaseHBodyAfterClaim mXForwardedEmail mXPomeriumJwt K8sCreateReleaseReq 
       else
         if T.toLower oldVersion == "unknown" || T.null oldVersion
           then case trackerType of
-            BackendScheduler -> do
-              -- Schedulers have no VS — discover from deployment labels
-              -- (pick the version with the most ready replicas).
-              discovered <- liftIO $ getRunningSchedulerVersion cfg (getProductNamespace pCfg) targetSvcHost
-              pure $ case discovered of
-                Right (Just ver) -> ver
+            BackendScheduler ->
+              -- Schedulers have no VS — discover from the running deployment
+              -- (pick the one with the most ready replicas).
+              pure $ case discoveredScheduler of
+                Right (Just (_, ver)) -> ver
                 _ -> oldVersion
             _ -> do
               discovered <- liftIO $ getPrimarySubsetFromVirtualService cfg (getProductNamespace pCfg) (getProductVsName pCfg) targetSvcHost
@@ -786,6 +807,12 @@ createReleaseHBodyAfterClaim mXForwardedEmail mXPomeriumJwt K8sCreateReleaseReq 
                 Right (Just subset) -> subset
                 _ -> oldVersion
           else pure oldVersion
+  -- Only set when the live deployment is the one being replaced AND its name
+  -- differs from the "<svcHost>-<oldVersion>" convention.
+  let resolvedOldDeploymentName = case discoveredScheduler of
+        Right (Just (depName, ver))
+          | ver == resolvedOldVersion && depName /= targetSvcHost <> "-" <> resolvedOldVersion -> Just depName
+        _ -> Nothing
   -- Changelog is always a generated GitHub diff link. Single-service creates
   -- build the link on the frontend and send it; multi-service creates (and any
   -- client that sends nothing) get it built here from the just-resolved old
@@ -809,9 +836,10 @@ createReleaseHBodyAfterClaim mXForwardedEmail mXPomeriumJwt K8sCreateReleaseReq 
             serviceName = targetSvcHost,
             destinationRuleName = targetSvcHost <> "-destinations",
             virtualServiceName = getProductVsName pCfg,
-            internalVirtualServiceName = metadataInternalVsName,
+            internalVirtualServiceName = resolvedInternalVsName,
             containerName = targetSvcHost,
             oldVersion = resolvedOldVersion,
+            oldDeploymentName = resolvedOldDeploymentName,
             newVersion = newVersion,
             dockerImage = metadataDockerImage,
             matches = [],
@@ -1162,6 +1190,7 @@ revertReleaseH ap rid req = do
                     oldCtx
                       { deploymentName = ctxServiceName <> "-" <> ctxOldVersion,
                         oldVersion = ctxNewVersion,
+                        oldDeploymentName = Nothing,
                         newVersion = ctxOldVersion,
                         abRunId = Nothing,
                         abStatus = Nothing,

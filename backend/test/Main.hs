@@ -29,9 +29,12 @@ import Data.Map.Strict qualified as Map
 import Data.Maybe (isJust, isNothing)
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.Encoding qualified as TE
 import Data.Time.Clock (addUTCTime, getCurrentTime)
 import Products.AirborneOta.Types.Permission (OtaPermission (..))
 import Products.Autopilot.Config (autopilotConfigs)
+import Products.Autopilot.Actions.VSEdit (parseVsDoc)
+import Products.Autopilot.Workflow.BackendServiceWorkflow (extractInternalVsPrimarySubset)
 import Products.Autopilot.ConfigDiff (extractContainerEnvJson)
 import Products.Autopilot.DiffLink (buildDiffLink, normalizeRepo, toCommitId)
 import Products.Autopilot.K8s.Execute (shellQuote)
@@ -200,6 +203,8 @@ main = do
   section "[39] Store release-notes parsing (Play track + iOS whatsNew)" testStoreReleaseNotesParse
   section "[53] ConfirmTag log-first tag extraction (tagPushedFromLog)" testTagPushedFromLog
   section "[54] Dispatch optional-input fallback (droppableUnexpectedInputs)" testDroppableUnexpectedInputs
+  section "[55] Internal VS cross-check matches FQDN route hosts" testInternalVsFqdnHost
+  section "[56] VS revert safety compares YAML snapshot with live JSON" testVsYamlJsonCompare
   section "[40] Out-of-band review detection (in-flight select / map / reconcile)" testExternalReviewDetection
   section "[41] Android pending-publish detection (track parse / pick rule)" testAndroidPendingPublish
   section "[49] Dispatch-group leader election (first living sibling)" testElectDispatchLeader
@@ -1467,6 +1472,31 @@ testResolveRollback = do
 -- | A ref whose workflow predates an optional input 422s the whole dispatch.
 -- GitHub creates no run for a rejected request, so dropping the optional input
 -- and retrying is safe — but only when EVERY name it listed is droppable.
+testVsYamlJsonCompare :: IO ()
+testVsYamlJsonCompare = do
+  let liveJson = "{\"metadata\":{\"name\":\"x\",\"resourceVersion\":\"7\"},\"spec\":{\"hosts\":[\"a\"],\"http\":[{\"route\":[{\"destination\":{\"subset\":\"db79cc\"}}]}]}}" :: Text
+      editorYaml = "metadata:\n  name: x\nspec:\n  hosts:\n  - a\n  http:\n  - route:\n    - destination:\n        subset: db79cc\n" :: Text
+      changedYaml = T.replace "db79cc" "61bdb3" editorYaml
+  assertBool "YAML snapshot parses" (isJust (parseVsDoc editorYaml))
+  assertEqual "YAML snapshot equals live JSON after noise strip" (parseVsDoc liveJson) (parseVsDoc editorYaml)
+  assertBool "changed subset is detected" (parseVsDoc liveJson /= parseVsDoc changedYaml)
+
+testInternalVsFqdnHost :: IO ()
+testInternalVsFqdnHost = do
+  let vsText =
+        "{\"spec\":{\"http\":[\
+        \{\"name\":\"critical-bpp-sync-search\",\"route\":[{\"destination\":{\"host\":\"beckn-driver-offer-bpp-critical-production.atlas.svc.cluster.local\",\"subset\":\"db79cc\"},\"weight\":100}]},\
+        \{\"name\":\"default\",\"route\":[{\"destination\":{\"host\":\"beckn-driver-offer-bpp-production.atlas.svc.cluster.local\"}}]}]}}" ::
+          Text
+      parsed = Aeson.eitherDecodeStrict (TE.encodeUtf8 vsText)
+  case parsed of
+    Left err -> fail ("  FAIL: test VS did not parse: " <> err)
+    Right v -> do
+      assertEqual "short service name matches FQDN route" (Just "db79cc") (extractInternalVsPrimarySubset v "beckn-driver-offer-bpp-critical-production")
+      assertEqual "FQDN service name matches FQDN route" (Just "db79cc") (extractInternalVsPrimarySubset v "beckn-driver-offer-bpp-critical-production.atlas.svc.cluster.local")
+      assertEqual "non-critical service has no subset route" Nothing (extractInternalVsPrimarySubset v "beckn-driver-offer-bpp-production")
+      assertEqual "unrelated service has no match" Nothing (extractInternalVsPrimarySubset v "something-else")
+
 testDroppableUnexpectedInputs :: IO ()
 testDroppableUnexpectedInputs = do
   putStrLn "dispatch: optional-input 422 fallback"

@@ -124,6 +124,12 @@ const VSEditSummary: React.FC = () => {
 
   const oldVsEvent = vsEvents.find((e: any) => e.category === 'SNAPSHOT' && e.label === 'VS_OLD');
   const newVsEvent = vsEvents.find((e: any) => e.category === 'SNAPSHOT' && e.label === 'VS_NEW');
+  const latestSnap = (label: string) =>
+    [...vsEvents].filter((e: any) => e.category === 'SNAPSHOT' && e.label === label)
+      .sort((a: any, b: any) => (b.timestamp || '').localeCompare(a.timestamp || ''))[0];
+  const extraVsNames = [...new Set(vsEvents
+    .filter((e: any) => e.category === 'SNAPSHOT' && typeof e.label === 'string' && e.label.startsWith('VS_NEW:'))
+    .map((e: any) => (e.label as string).slice('VS_NEW:'.length)))] as string[];
 
   return (
     <div className="flex flex-col flex-1 w-full pb-12">
@@ -259,6 +265,18 @@ const VSEditSummary: React.FC = () => {
             ) : (
               <div className="p-6 text-sm text-zinc-400">No VS diff available. Snapshots are captured when the VS is locked/edited.</div>
             )}
+            {extraVsNames.map(n => (
+              <div key={n} className="overflow-x-auto text-xs sm:text-sm border-t border-zinc-200">
+                <ReactDiffViewer
+                  oldValue={latestSnap(`VS_OLD:${n}`)?.data || ''}
+                  newValue={latestSnap(`VS_NEW:${n}`)?.data || ''}
+                  splitView={true}
+                  leftTitle={`${n} (old)`}
+                  rightTitle={`${n} (new)`}
+                  useDarkTheme={false}
+                />
+              </div>
+            ))}
           </div>
         )}
       </div>
