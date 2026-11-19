@@ -62,6 +62,8 @@ data DevboxRelease = DevboxRelease
     , drStoppedAt :: Maybe UTCTime
     , drAppBuilds :: [Text]
     -- ^ app builds asked for, as 'app:platform' (rider:android, driver:ios, …)
+    , drGrpcAddress :: Maybe Text
+    -- ^ the workspace's notification-service gRPC (devbox tailnet IP:port), for the Android driver app build
     }
     deriving (Show)
 
@@ -76,6 +78,7 @@ instance FromRow DevboxRelease where
             <*> field <*> field <*> field <*> field <*> field
             <*> field
             <*> (fromPGArray <$> field)
+            <*> field
 
 instance ToJSON DevboxRelease where
     toJSON r =
@@ -112,6 +115,7 @@ instance ToJSON DevboxRelease where
             , "expiresAt" .= drExpiresAt r
             , "stoppedAt" .= drStoppedAt r
             , "appBuilds" .= drAppBuilds r
+            , "grpcAddress" .= drGrpcAddress r
             ]
 
 -- | One row of @devbox_release_event@: a stage started / done / failed, a stop, an expiry.
