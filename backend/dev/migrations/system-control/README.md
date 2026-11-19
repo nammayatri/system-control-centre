@@ -18,6 +18,7 @@ Tables are created by `dev/sql-seed/system-control-seed.sql`. These migrations a
 | `0059-devbox-app-builds.sql` | Devbox Releases: rider/driver app builds on Android and iOS |
 | `0060-capacity-scaler.sql` | Capacity scaler: `redis_config` / `db_config` targets, schedules, apply ledger, events, guardrails, autoscaler history — see `../../../SCALER.md` |
 | `0061-config-pilot-releaser-role.sql` | `config_pilot_releaser` role for staggered ConfigPilot config releases |
+| `0062-devbox-release-grpc-address.sql` | Devbox Releases: the workspace's notification-service gRPC address, passed to the Android driver app build |
 
 ## Manual application
 

@@ -101,7 +101,7 @@ startBuilds creds r =
                 insertBuild (drId r) (abApp ab) (abPlatform ab) >>= \case
                     Nothing -> pure ()
                     Just bid -> do
-                        res <- dispatchAppBuild creds ab ref backendUrl (drWorkspace r) (drId r)
+                        res <- dispatchAppBuild creds ab ref backendUrl (drGrpcAddress r) (drWorkspace r) (drId r)
                         case res of
                             Right (Just d) -> () <$ setBuildRun bid (drdRunId d) (drdHtmlUrl d)
                             Right Nothing -> () <$ setBuildFailed bid "GitHub started the build but did not say which run"
@@ -266,6 +266,7 @@ parseResult logText = do
             , riBackendUrl = nonEmpty (get "backend_url")
             , riCcUrl = nonEmpty (get "cc_url")
             , riDataVersion = dataVersion
+            , riGrpcAddress = nonEmpty (get "grpc_address")
             }
 
 {- | The most useful error line: devbox_core prints {"error": "…"} on failure;

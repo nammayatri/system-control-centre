@@ -61,7 +61,7 @@ releaseCols =
     \build_android, build_ios, data_source, data_version, \
     \devbox_name, devbox_host, devbox_user, backend_url, cc_url, \
     \gh_run_id, gh_run_url, error, created_by, stopped_by, stop_reason, \
-    \created_at, updated_at, ready_at, expires_at, stopped_at, app_builds"
+    \created_at, updated_at, ready_at, expires_at, stopped_at, app_builds, grpc_address"
 
 activeArr :: PGArray Text
 activeArr = PGArray activeStatuses
@@ -319,6 +319,7 @@ data ReadyInfo = ReadyInfo
     , riBackendUrl :: Maybe Text
     , riCcUrl :: Maybe Text
     , riDataVersion :: Maybe Text
+    , riGrpcAddress :: Maybe Text
     }
     deriving (Show)
 
@@ -332,9 +333,9 @@ setReady rid ri =
                 "UPDATE devbox_release \
                 \SET status = 'READY', stage = 'ready', ready_at = now(), updated_at = now(), error = NULL, \
                 \    devbox_name = ?, devbox_host = ?, devbox_user = ?, backend_url = ?, cc_url = ?, \
-                \    data_version = COALESCE(?, data_version) \
+                \    data_version = COALESCE(?, data_version), grpc_address = ? \
                 \WHERE id = ? AND status IN ('QUEUED', 'RUNNING')"
-                (riDevboxName ri, riDevboxHost ri, riDevboxUser ri, riBackendUrl ri, riCcUrl ri, riDataVersion ri, rid)
+                (riDevboxName ri, riDevboxHost ri, riDevboxUser ri, riBackendUrl ri, riCcUrl ri, riDataVersion ri, riGrpcAddress ri, rid)
 
 {- | The spawn run failed at its current stage. The workspace is left on the
 dev-box for a look (Stop removes it), so the devbox fields are kept.

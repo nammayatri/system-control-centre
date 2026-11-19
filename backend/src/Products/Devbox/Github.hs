@@ -93,10 +93,13 @@ appBuildFor = \case
 {- | Start one app build on the app branch, pointed at the release's backend.
 The rider workflows take a change log; the driver ones a version name and
 release notes. Apps (catalyst names) and the driver version name come from
-server config.
+server config. The Android driver build also gets the workspace's
+notification-service gRPC address, so the app takes ride requests from the
+devbox instead of production gRPC; only that workflow has the grpc_address
+input (GitHub rejects unknown inputs with 422).
 -}
-dispatchAppBuild :: GhAppCreds -> AppBuild -> Text -> Text -> Text -> Text -> Flow (Either Text (Maybe DispatchRunDetails))
-dispatchAppBuild creds ab ref backendUrl workspace rid = do
+dispatchAppBuild :: GhAppCreds -> AppBuild -> Text -> Text -> Maybe Text -> Text -> Text -> Flow (Either Text (Maybe DispatchRunDetails))
+dispatchAppBuild creds ab ref backendUrl mbGrpcAddress workspace rid = do
     riderApp <- getConfigTextForProduct "devbox_rider_app" (Just "devbox") "NammaYatri"
     driverApp <- getConfigTextForProduct "devbox_driver_app" (Just "devbox") "NammaYatriPartner"
     versionName <- getConfigTextForProduct "devbox_driver_version_name" (Just "devbox") "9.9.9"
@@ -107,5 +110,7 @@ dispatchAppBuild creds ab ref backendUrl workspace rid = do
                 common
                     <> if abApp ab == "rider"
                         then [("selected_apps", String riderApp), ("change_log", String note)]
-                        else [("selected_apps", String driverApp), ("version_name", String versionName), ("release_notes", String note)]
+                        else
+                            [("selected_apps", String driverApp), ("version_name", String versionName), ("release_notes", String note)]
+                                <> [("grpc_address", String g) | abPlatform ab == "android", Just g <- [mbGrpcAddress]]
     dispatchWorkflow creds (fst appRepo) (snd appRepo) (abWorkflow ab) (WorkflowDispatchReq ref inputs)
